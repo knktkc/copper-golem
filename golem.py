@@ -400,14 +400,23 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
 
 
 def _notify(title: str, text: str) -> None:
-    """Best-effort macOS desktop notification, so results are visible without
-    digging through the log file."""
-    osa = "/usr/bin/osascript"
-    if not Path(osa).exists():
-        return
-    script = f"display notification {json.dumps(text)} with title {json.dumps(title)}"
+    """Best-effort desktop notification, so results are visible without digging
+    through the log file. Prefers terminal-notifier (reliable from launchd);
+    falls back to osascript."""
+    tn = shutil.which("terminal-notifier") or next(
+        (p for p in ("/opt/homebrew/bin/terminal-notifier",
+                     "/usr/local/bin/terminal-notifier") if Path(p).exists()),
+        None,
+    )
     try:
-        subprocess.run([osa, "-e", script], capture_output=True, timeout=10)
+        if tn:
+            subprocess.run([tn, "-title", title, "-message", text],
+                           capture_output=True, timeout=10)
+            return
+        osa = "/usr/bin/osascript"
+        if Path(osa).exists():
+            script = f"display notification {json.dumps(text)} with title {json.dumps(title)}"
+            subprocess.run([osa, "-e", script], capture_output=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         pass
 
@@ -514,8 +523,6 @@ PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 \t<string>{log}</string>
 \t<key>RunAtLoad</key>
 \t<false/>
-\t<key>ProcessType</key>
-\t<string>Background</string>
 </dict>
 </plist>
 """

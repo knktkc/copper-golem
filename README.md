@@ -38,6 +38,7 @@ Minecraft の**銅ゴーレム**（落ちたアイテムを拾い、同じ物が
 - macOS
 - **[Claude Code](https://claude.com/claude-code)（`claude` CLI）がインストール済み・ログイン済み**（サブスクでOK）
 - Python 3.11 以上
+- **（推奨）`terminal-notifier`**（`brew install terminal-notifier`）— 常駐からの結果通知に使用。新しめの macOS では launchd からの `osascript` 通知が弾かれるため、これが無いと常駐時に通知が出ないことがあります（無くてもログには記録されます）
 - （任意）`pdftotext`・`tesseract` があれば PDF/画像 OCR も扱える（無くても劣化動作）
 
 ## インストール
