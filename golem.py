@@ -43,6 +43,7 @@ DEFAULT_CONFIG: dict = {
     "enable_ocr": False,             # OCR images with tesseract (slow); off by default
     "claude_timeout": 120,
     "claude_bin": "",                # path to the `claude` CLI; empty = auto-detect (PATH, mise/npm, homebrew, ...)
+    "notify": True,                  # show a macOS desktop notification after each live run
 }
 
 CONFIG_PATHS = [
@@ -398,6 +399,19 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
     return root / on_no_match
 
 
+def _notify(title: str, text: str) -> None:
+    """Best-effort macOS desktop notification, so results are visible without
+    digging through the log file."""
+    osa = "/usr/bin/osascript"
+    if not Path(osa).exists():
+        return
+    script = f"display notification {json.dumps(text)} with title {json.dumps(title)}"
+    try:
+        subprocess.run([osa, "-e", script], capture_output=True, timeout=10)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def cmd_once(cfg: dict, roots: list[Path]) -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
     mode = "dry-run" if cfg["dry_run"] else "live"
@@ -411,6 +425,16 @@ def cmd_once(cfg: dict, roots: list[Path]) -> int:
     print(f"[{mode}] considered {tc} · {verb} {tm} · kept(no match) {tk} · errors {te}")
     if te:
         print(f"  WARNING: {te} file(s) ERRORED (see [error] lines) — these are failures, not 'no match'.")
+
+    if cfg.get("notify", True) and not cfg["dry_run"] and (tm or tk or te):
+        parts = []
+        if tm:
+            parts.append(f"{tm}件を振り分け")
+        if tk:
+            parts.append(f"該当なし{tk}件")
+        if te:
+            parts.append(f"⚠️エラー{te}件")
+        _notify("copper-golem ⚠️" if te else "copper-golem 🟫", " / ".join(parts))
     return 0
 
 

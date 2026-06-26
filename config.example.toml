@@ -45,3 +45,7 @@ claude_timeout = 120
 # function. Example:
 #   claude_bin = "~/.local/share/mise/installs/node/24.4.0/bin/claude"
 claude_bin = ""
+
+# Show a macOS desktop notification after each live run (moved / kept / errors),
+# so you don't have to watch the log file. Set false to disable.
+notify = true
