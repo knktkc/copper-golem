@@ -243,7 +243,7 @@ def resolve_claude(cfg: dict) -> str | None:
 def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
     claude = resolve_claude(cfg)
     if claude is None:
-        return {"folder": None, "confidence": 0.0,
+        return {"folder": None, "confidence": 0.0, "error": True,
                 "reason": "claude binary not found — set claude_bin in config.toml"}
     folders_block = "\n".join(
         f"- {f.name}: {folder_profile(f)}" for f in folders
@@ -265,10 +265,10 @@ def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
             timeout=cfg["claude_timeout"], env=env,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
-        return {"folder": None, "confidence": 0.0, "reason": f"claude error: {e}"}
+        return {"folder": None, "confidence": 0.0, "error": True, "reason": f"claude error: {e}"}
 
     if r.returncode != 0:
-        return {"folder": None, "confidence": 0.0, "reason": f"claude exit {r.returncode}: {r.stderr[:200]}"}
+        return {"folder": None, "confidence": 0.0, "error": True, "reason": f"claude exit {r.returncode}: {r.stderr[:200]}"}
 
     # `--output-format json` wraps the model reply; the text is under "result".
     inner = r.stdout
@@ -280,7 +280,7 @@ def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
     try:
         return _parse_classification(inner)
     except (json.JSONDecodeError, ValueError):
-        return {"folder": None, "confidence": 0.0, "reason": "unparseable classifier output"}
+        return {"folder": None, "confidence": 0.0, "error": True, "reason": "unparseable classifier output"}
 
 
 # --------------------------------------------------------------------------- #
@@ -342,45 +342,53 @@ def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int]:
         print(f"[skip] no candidate folders under {root}")
         return (0, 0)
 
-    considered = moved = 0
+    considered = moved = kept = errors = 0
     for entry in sorted(root.iterdir()):
         if not entry.is_file() or is_excluded(entry, cfg):
             continue
         if not is_stable(entry, cfg):
-            print(f"[wait] still settling: {entry.name}")
+            print(f"[wait] {entry.name}  (modified <{cfg['stability_seconds']}s ago — will retry next run)")
             continue
 
         considered += 1
         file_block = extract_text(entry, cfg)
         decision = classify(file_block, folders, cfg)
+
+        # Distinguish a real failure from a clean "no folder fits".
+        if decision.get("error"):
+            errors += 1
+            print(f"[error] {entry.name}  — {decision.get('reason', 'unknown error')}")
+            continue
+
         folder_name = decision.get("folder")
         conf = decision.get("confidence") or 0.0
 
         if not folder_name or conf < cfg["confidence_threshold"]:
+            kept += 1
             target = _no_match_target(root, cfg)
             if target is None:
-                print(f"[keep] {entry.name}  (conf={conf:.2f}, {decision.get('reason','')})")
+                print(f"[keep] {entry.name}  (no match · conf={conf:.2f} · {decision.get('reason','')})")
                 continue
             dest_dir = target
         else:
             match = next((f for f in folders if f.name == folder_name), None)
             if match is None:
+                kept += 1
                 print(f"[keep] {entry.name}  (model named unknown folder '{folder_name}')")
                 continue
             dest_dir = match
 
         dest = unique_dest(dest_dir / entry.name)
+        moved += 1
         if cfg["dry_run"]:
             print(f"[dry-run] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
             continue
-
         dest_dir.mkdir(parents=True, exist_ok=True)
         shutil.move(str(entry), str(dest))
         append_move(batch, entry, dest, decision)
-        moved += 1
         print(f"[move] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
 
-    return (considered, moved)
+    return (considered, moved, kept, errors)
 
 
 def _no_match_target(root: Path, cfg: dict) -> Path | None:
@@ -392,13 +400,17 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
 
 def cmd_once(cfg: dict, roots: list[Path]) -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
-    total_c = total_m = 0
-    for root in roots:
-        c, m = process_root(root, cfg, batch)
-        total_c += c
-        total_m += m
     mode = "dry-run" if cfg["dry_run"] else "live"
-    print(f"\n[{mode}] considered {total_c} file(s), moved {total_m}.")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"\n=== copper-golem run {stamp} [{mode}] ===")
+    tc = tm = tk = te = 0
+    for root in roots:
+        c, m, k, e = process_root(root, cfg, batch)
+        tc += c; tm += m; tk += k; te += e
+    verb = "would move" if cfg["dry_run"] else "moved"
+    print(f"[{mode}] considered {tc} · {verb} {tm} · kept(no match) {tk} · errors {te}")
+    if te:
+        print(f"  WARNING: {te} file(s) ERRORED (see [error] lines) — these are failures, not 'no match'.")
     return 0
 
 
