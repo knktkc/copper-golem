@@ -46,6 +46,18 @@ claude_timeout = 120
 #   claude_bin = "~/.local/share/mise/installs/node/24.4.0/bin/claude"
 claude_bin = ""
 
-# Show a macOS desktop notification after each live run (moved / kept / errors),
-# so you don't have to watch the log file. Set false to disable.
+# Show a desktop notification after each live run (moved / kept / errors), so you
+# don't have to watch the log file. Set false to disable.
+# NOTE: from launchd, osascript notifications are blocked on recent macOS — install
+# terminal-notifier (`brew install terminal-notifier`) for reliable delivery.
 notify = true
+
+# Play a sound and ignore Do-Not-Disturb so the notification is hard to miss.
+# (To make it STAY on screen, set the notifier's style to "Alerts" in
+#  System Settings > Notifications > terminal-notifier.)
+notify_sound = true
+
+# Also sweep every N seconds, not just when files change (0 = on-change only).
+# Catches files skipped during the stability wait, or added before a matching
+# category folder existed. 300 = every 5 minutes. Empty sweeps are silent.
+interval_seconds = 0

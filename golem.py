@@ -43,7 +43,9 @@ DEFAULT_CONFIG: dict = {
     "enable_ocr": False,             # OCR images with tesseract (slow); off by default
     "claude_timeout": 120,
     "claude_bin": "",                # path to the `claude` CLI; empty = auto-detect (PATH, mise/npm, homebrew, ...)
-    "notify": True,                  # show a macOS desktop notification after each live run
+    "notify": True,                  # show a desktop notification after each live run
+    "notify_sound": True,            # play a sound + ignore Do-Not-Disturb (so it's hard to miss)
+    "interval_seconds": 0,           # also sweep every N seconds (0 = only when files change)
 }
 
 CONFIG_PATHS = [
@@ -399,10 +401,11 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
     return root / on_no_match
 
 
-def _notify(title: str, text: str) -> None:
+def _notify(cfg: dict, title: str, text: str) -> None:
     """Best-effort desktop notification, so results are visible without digging
     through the log file. Prefers terminal-notifier (reliable from launchd);
-    falls back to osascript."""
+    falls back to osascript. Adds sound + ignore-DnD so it's hard to miss."""
+    sound = cfg.get("notify_sound", True)
     tn = shutil.which("terminal-notifier") or next(
         (p for p in ("/opt/homebrew/bin/terminal-notifier",
                      "/usr/local/bin/terminal-notifier") if Path(p).exists()),
@@ -410,12 +413,16 @@ def _notify(title: str, text: str) -> None:
     )
     try:
         if tn:
-            subprocess.run([tn, "-title", title, "-message", text],
-                           capture_output=True, timeout=10)
+            argv = [tn, "-title", title, "-message", text, "-ignoreDnD"]
+            if sound:
+                argv += ["-sound", "default"]
+            subprocess.run(argv, capture_output=True, timeout=10)
             return
         osa = "/usr/bin/osascript"
         if Path(osa).exists():
             script = f"display notification {json.dumps(text)} with title {json.dumps(title)}"
+            if sound:
+                script += ' sound name "default"'
             subprocess.run([osa, "-e", script], capture_output=True, timeout=10)
     except (OSError, subprocess.TimeoutExpired):
         pass
@@ -424,16 +431,18 @@ def _notify(title: str, text: str) -> None:
 def cmd_once(cfg: dict, roots: list[Path]) -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
     mode = "dry-run" if cfg["dry_run"] else "live"
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"\n=== copper-golem run {stamp} [{mode}] ===")
     tc = tm = tk = te = 0
     for root in roots:
         c, m, k, e = process_root(root, cfg, batch)
         tc += c; tm += m; tk += k; te += e
-    verb = "would move" if cfg["dry_run"] else "moved"
-    print(f"[{mode}] considered {tc} · {verb} {tm} · kept(no match) {tk} · errors {te}")
-    if te:
-        print(f"  WARNING: {te} file(s) ERRORED (see [error] lines) — these are failures, not 'no match'.")
+
+    # Stay quiet on empty sweeps so periodic runs don't flood the log.
+    if tc or te:
+        stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        verb = "would move" if cfg["dry_run"] else "moved"
+        print(f"[{stamp} {mode}] considered {tc} · {verb} {tm} · kept(no match) {tk} · errors {te}")
+        if te:
+            print(f"  WARNING: {te} file(s) ERRORED (see [error] lines) — failures, not 'no match'.")
 
     if cfg.get("notify", True) and not cfg["dry_run"] and (tm or tk or te):
         parts = []
@@ -443,7 +452,7 @@ def cmd_once(cfg: dict, roots: list[Path]) -> int:
             parts.append(f"該当なし{tk}件")
         if te:
             parts.append(f"⚠️エラー{te}件")
-        _notify("copper-golem ⚠️" if te else "copper-golem 🟫", " / ".join(parts))
+        _notify(cfg, "copper-golem ⚠️" if te else "copper-golem 🟫", " / ".join(parts))
     return 0
 
 
@@ -517,7 +526,7 @@ PLIST_TEMPLATE = """<?xml version="1.0" encoding="UTF-8"?>
 \t<array>
 {watch}
 \t</array>
-\t<key>StandardOutPath</key>
+{interval}\t<key>StandardOutPath</key>
 \t<string>{log}</string>
 \t<key>StandardErrorPath</key>
 \t<string>{log}</string>
@@ -546,8 +555,12 @@ def cmd_install(cfg: dict, roots: list[str], config_path: str | None) -> int:
         prog += ["--config", str(Path(config_path).expanduser().resolve())]
     args_xml = "\n".join(f"\t\t<string>{a}</string>" for a in prog)
     watch_xml = "\n".join(f"\t\t<string>{r}</string>" for r in roots)
+    interval = int(cfg.get("interval_seconds", 0) or 0)
+    interval_xml = (f"\t<key>StartInterval</key>\n\t<integer>{interval}</integer>\n"
+                    if interval > 0 else "")
 
-    plist = PLIST_TEMPLATE.format(label=label, args=args_xml, watch=watch_xml, log=log)
+    plist = PLIST_TEMPLATE.format(label=label, args=args_xml, watch=watch_xml,
+                                  log=log, interval=interval_xml)
     path = _plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["launchctl", "unload", str(path)], capture_output=True)  # reload if present
@@ -557,7 +570,7 @@ def cmd_install(cfg: dict, roots: list[str], config_path: str | None) -> int:
         print(f"launchctl load failed: {r.stderr.strip()}", file=sys.stderr)
         return 1
     print(f"Installed and loaded: {path}")
-    print(f"Watching: {', '.join(roots)}")
+    print(f"Watching: {', '.join(roots)}" + (f"  (+ sweep every {interval}s)" if interval > 0 else ""))
     print(f"Logs: {log}")
     if cfg.get("dry_run", True):
         print("\nNote: dry_run is ON — files won't move yet. Set dry_run=false in your config "
