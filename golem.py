@@ -18,10 +18,12 @@ import fnmatch
 import getpass
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tomllib
+import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -40,6 +42,7 @@ DEFAULT_CONFIG: dict = {
     "exclude_globs": ["*.crdownload", "*.part", "*.download", "*.tmp", ".*"],
     "enable_ocr": False,             # OCR images with tesseract (slow); off by default
     "claude_timeout": 120,
+    "claude_bin": "",                # path to the `claude` CLI; empty = auto-detect (PATH, mise/npm, homebrew, ...)
 }
 
 CONFIG_PATHS = [
@@ -76,6 +79,7 @@ TEXT_EXTS = {
 }
 OFFICE_EXTS = {".doc", ".docx", ".rtf", ".odt", ".rtfd", ".wordml"}
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".heic", ".tiff", ".bmp"}
+SPREADSHEET_EXTS = {".xlsx", ".xlsm"}
 
 
 def _have(tool: str) -> bool:
@@ -88,6 +92,23 @@ def _run_capture(argv: list[str], timeout: int = 30) -> str:
         return r.stdout if r.returncode == 0 else ""
     except (subprocess.TimeoutExpired, OSError):
         return ""
+
+
+def _xlsx_text(path: Path, max_chars: int) -> str:
+    """Pull sheet names + cell strings from an .xlsx/.xlsm (zip + XML, stdlib only)."""
+    out: list[str] = []
+    try:
+        with zipfile.ZipFile(path) as z:
+            names = z.namelist()
+            if "xl/workbook.xml" in names:
+                wb = z.read("xl/workbook.xml").decode("utf-8", "replace")
+                out += [f"sheet: {n}" for n in re.findall(r'<sheet[^>]*name="([^"]+)"', wb)]
+            if "xl/sharedStrings.xml" in names:
+                ss = z.read("xl/sharedStrings.xml").decode("utf-8", "replace")
+                out += re.findall(r"<t[^>]*>(.*?)</t>", ss, re.S)
+    except (zipfile.BadZipFile, OSError, KeyError):
+        return ""
+    return "\n".join(out)[:max_chars]
 
 
 def extract_text(path: Path, cfg: dict) -> str:
@@ -105,6 +126,8 @@ def extract_text(path: Path, cfg: dict) -> str:
             body = _run_capture(["pdftotext", "-l", "5", "-nopgbrk", str(path), "-"])
         elif ext in OFFICE_EXTS and _have("textutil"):
             body = _run_capture(["textutil", "-convert", "txt", "-stdout", str(path)])
+        elif ext in SPREADSHEET_EXTS:
+            body = _xlsx_text(path, cfg["max_chars"])
         elif ext in IMAGE_EXTS:
             meta = _run_capture(["sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)]) if _have("sips") else ""
             ocr = ""
@@ -190,21 +213,56 @@ def _parse_classification(text: str) -> dict:
     return json.loads(t)
 
 
+def resolve_claude(cfg: dict) -> str | None:
+    """Locate the `claude` binary. launchd/cron don't inherit your shell PATH,
+    and `claude` is often a shell function — so check config, then PATH, then
+    known install locations (mise/npm, homebrew, ~/.local, cmux)."""
+    explicit = cfg.get("claude_bin", "")
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.exists():
+            return str(p)
+    found = shutil.which("claude")
+    if found:
+        return found
+    cands: list[Path] = sorted(
+        Path("~/.local/share/mise/installs/node").expanduser().glob("*/bin/claude"),
+        reverse=True,
+    )
+    cands += [Path(p).expanduser() for p in (
+        "~/.mise/shims/claude", "~/.local/bin/claude",
+        "/opt/homebrew/bin/claude", "/usr/local/bin/claude",
+        "/Applications/cmux.app/Contents/Resources/bin/claude",
+    )]
+    for c in cands:
+        if c.exists():
+            return str(c)
+    return None
+
+
 def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
+    claude = resolve_claude(cfg)
+    if claude is None:
+        return {"folder": None, "confidence": 0.0,
+                "reason": "claude binary not found — set claude_bin in config.toml"}
     folders_block = "\n".join(
         f"- {f.name}: {folder_profile(f)}" for f in folders
     )
     prompt = PROMPT_TEMPLATE.format(file_block=file_block, folders_block=folders_block)
     argv = [
-        "claude", "-p",
+        claude, "-p",
         "--model", cfg["model"],
         "--output-format", "json",
         "--allowedTools", "",
     ]
+    # launchd/cron run with a minimal PATH; make sure the dir holding `claude`
+    # (and its sibling `node`) is reachable so the CLI can actually launch.
+    env = os.environ.copy()
+    env["PATH"] = str(Path(claude).parent) + os.pathsep + env.get("PATH", "")
     try:
         r = subprocess.run(
             argv, input=prompt, capture_output=True, text=True,
-            timeout=cfg["claude_timeout"],
+            timeout=cfg["claude_timeout"], env=env,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
         return {"folder": None, "confidence": 0.0, "reason": f"claude error: {e}"}
@@ -459,7 +517,8 @@ def cmd_install(cfg: dict, roots: list[str], config_path: str | None) -> int:
     print(f"Watching: {', '.join(roots)}")
     print(f"Logs: {log}")
     if cfg.get("dry_run", True):
-        print("\nNote: dry_run is ON — files won't move yet. Watch the log, then set dry_run=false.")
+        print("\nNote: dry_run is ON — files won't move yet. Set dry_run=false in your config "
+              "(no reinstall needed; the watcher re-reads the config on each run).")
     return 0
 
 

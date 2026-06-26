@@ -97,7 +97,7 @@ python3 golem.py --apply              # 実際に移動（config が dry_run=fal
 # 別の設定で：  ./install.sh --config ~/my-config.toml
 ```
 
-ログは `~/Library/Logs/copper-golem.log`。**最初は `dry_run = true` のまま様子を見て**、ログが期待通りなら `dry_run = false` にして再 `./install.sh`。
+ログは `~/Library/Logs/copper-golem.log`。**最初は `dry_run = true` のまま様子を見て**、ログが期待通りなら `dry_run = false` に変えて保存するだけ。**再 `./install.sh` は不要**で、常駐は実行のたびに設定を読み直します。
 
 ## 取り消し（undo）
 

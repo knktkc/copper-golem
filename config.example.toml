@@ -38,3 +38,10 @@ enable_ocr = false
 
 # Hard timeout (seconds) for each `claude -p` invocation.
 claude_timeout = 120
+
+# Path to the `claude` CLI. Empty = auto-detect (PATH, then mise/npm, homebrew,
+# ~/.local, cmux). Set this explicitly if auto-detect fails — important because
+# launchd/cron don't inherit your shell PATH and `claude` is often a shell
+# function. Example:
+#   claude_bin = "~/.local/share/mise/installs/node/24.4.0/bin/claude"
+claude_bin = ""
