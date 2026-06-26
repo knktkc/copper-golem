@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.DS_Store
+
+# Personal config lives outside the repo (~/.config/copper-golem/config.toml).
+# If you keep a local copy here, don't commit it:
+config.toml

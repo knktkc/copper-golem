@@ -1,0 +1,40 @@
+# copper-golem configuration
+#
+# Copy this file to ~/.config/copper-golem/config.toml and edit, or point at it
+# with the COPPER_GOLEM_CONFIG environment variable / `--config` flag.
+
+# Folders to watch. Files placed DIRECTLY in a root are sorted into that root's
+# sibling category subfolders. Multiple roots allowed. "~" is expanded.
+watch_roots = ["~/Downloads"]
+
+# Model used by `claude -p`. Classification is cheap & fast — Haiku is plenty.
+model = "claude-haiku-4-5"
+
+# Start in dry-run: nothing is moved, decisions are only printed. Flip to false
+# once you trust the results.
+dry_run = true
+
+# What to do when no folder matches well enough:
+#   "keep"      -> leave the file where it is (Copper-Golem-faithful)
+#   "<name>"    -> move it into a folder of that name (e.g. "_unsorted")
+on_no_match = "keep"
+
+# Confidence below this is treated as "no match" (curbs misfiling). 0.0–1.0.
+confidence_threshold = 0.6
+
+# Cap on extracted text per file fed to the classifier.
+max_chars = 4000
+
+# Skip files modified within the last N seconds (avoids grabbing in-flight
+# downloads / files still being written).
+stability_seconds = 20
+
+# Filename patterns to ignore entirely.
+exclude_globs = ["*.crdownload", "*.part", "*.download", "*.tmp", ".*"]
+
+# OCR images with tesseract (slow, requires tesseract). Off by default; when
+# off, images are classified by filename (+ pixel dimensions via sips).
+enable_ocr = false
+
+# Hard timeout (seconds) for each `claude -p` invocation.
+claude_timeout = 120
