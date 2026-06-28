@@ -508,6 +508,94 @@ class TestProcessRoot(StateDirMixin):
         self.assertEqual(calls["n"], 2)
 
 
+class TestDescribe(unittest.TestCase):
+    """`describe` writes a .golem.md per category folder from Claude's summary."""
+
+    def _root(self, folders=("請求書", "写真")):
+        d = TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        root = Path(d.name)
+        for f in folders:
+            (root / f).mkdir()
+        return root
+
+    def test_generate_profile_returns_text(self):
+        root = self._root()
+        (root / "請求書" / "invoice.txt").write_text("請求書 合計 1000円", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=("取引先からの請求書を入れる場所。", "")):
+            text, err = golem.generate_profile(root / "請求書", cfg())
+        self.assertEqual(err, "")
+        self.assertEqual(text, "取引先からの請求書を入れる場所。")
+
+    def test_generate_profile_strips_quotes_and_fences(self):
+        root = self._root()
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=('```\n「請求書の置き場」\n```', "")):
+            text, _ = golem.generate_profile(root / "請求書", cfg())
+        self.assertEqual(text, "請求書の置き場")
+
+    def test_generate_profile_empty_folder(self):
+        root = self._root()
+        text, err = golem.generate_profile(root / "写真", cfg())  # no files
+        self.assertIsNone(text)
+        self.assertEqual(err, "empty")
+
+    def test_generate_profile_claude_error(self):
+        root = self._root()
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=(None, "claude exit 1: boom")):
+            text, err = golem.generate_profile(root / "請求書", cfg())
+        self.assertIsNone(text)
+        self.assertIn("boom", err)
+
+    def test_describe_writes_files(self):
+        root = self._root()
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        (root / "写真" / "p.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=("説明文", "")):
+            with redirect_stdout(io.StringIO()):
+                golem.cmd_describe(cfg(dry_run=False), [root], force=False)
+        self.assertEqual((root / "請求書" / ".golem.md").read_text(encoding="utf-8").strip(), "説明文")
+        self.assertEqual((root / "写真" / ".golem.md").read_text(encoding="utf-8").strip(), "説明文")
+
+    def test_describe_skips_existing_without_force(self):
+        root = self._root(folders=("請求書",))
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        (root / "請求書" / ".golem.md").write_text("既存の説明", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=("新しい説明", "")) as inv:
+            with redirect_stdout(io.StringIO()):
+                golem.cmd_describe(cfg(dry_run=False), [root], force=False)
+        inv.assert_not_called()  # didn't even ask Claude
+        self.assertEqual((root / "請求書" / ".golem.md").read_text(encoding="utf-8"), "既存の説明")
+
+    def test_describe_overwrites_with_force(self):
+        root = self._root(folders=("請求書",))
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        (root / "請求書" / ".golem.md").write_text("古い説明", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=("新しい説明", "")):
+            with redirect_stdout(io.StringIO()):
+                golem.cmd_describe(cfg(dry_run=False), [root], force=True)
+        self.assertEqual((root / "請求書" / ".golem.md").read_text(encoding="utf-8").strip(), "新しい説明")
+
+    def test_describe_dry_run_does_not_write(self):
+        root = self._root(folders=("請求書",))
+        (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "_invoke_claude", return_value=("説明文", "")):
+            buf = io.StringIO()
+            with redirect_stdout(buf):
+                golem.cmd_describe(cfg(dry_run=True), [root], force=False)
+        self.assertFalse((root / "請求書" / ".golem.md").exists())
+        self.assertIn("dry-run", buf.getvalue())
+
+    def test_describe_skips_empty_folder(self):
+        root = self._root(folders=("空",))
+        with mock.patch.object(golem, "_invoke_claude") as inv:
+            with redirect_stdout(io.StringIO()):
+                golem.cmd_describe(cfg(dry_run=False), [root], force=False)
+        inv.assert_not_called()
+        self.assertFalse((root / "空" / ".golem.md").exists())
+
+
 class TestNoMatchCacheEndToEnd(StateDirMixin):
     """cmd_once persists the cache across runs: a steady sweep stays silent."""
 
@@ -741,6 +829,18 @@ class TestMain(unittest.TestCase):
             with mock.patch.object(golem, "cmd_undo", return_value=0) as undo:
                 golem.main(["undo"])
         undo.assert_called_once()
+
+    def test_describe_dispatch_passes_force(self):
+        captured = {}
+
+        def fake_describe(c, roots, force):
+            captured["force"] = force
+            return 0
+
+        with mock.patch.object(golem, "load_config", return_value=cfg()):
+            with mock.patch.object(golem, "cmd_describe", fake_describe):
+                golem.main(["describe", "--force", "--root", "/tmp"])
+        self.assertTrue(captured["force"])
 
 
 if __name__ == "__main__":

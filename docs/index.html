@@ -429,6 +429,17 @@ python3 -m unittest discover -s tests</div>
       振り分け先のフォルダは自分で用意します。監視ルート直下に <code>請求書/</code> <code>写真/</code> のように作るだけ。
       フォルダに <code>.golem.md</code> を置いて「何を入れる場所か」を一文書くと、判定の手がかりになります。
     </p>
+
+    <div class="term"><span class="c"># 各フォルダの中身から「何を入れる場所か」の説明を自動生成</span>
+python3 golem.py <span class="p">describe</span> <span class="p">--dry-run</span>
+<span class="o">[dry-run] 請求書/.golem.md  ←  取引先に発行した請求書を保存するフォルダです。</span>
+
+python3 golem.py <span class="p">describe</span> <span class="p">--apply</span>   <span class="c"># 実際に .golem.md を書き出す</span></div>
+
+    <p style="color:var(--ink-soft);">
+      <code>describe</code> は、フォルダにすでに入っているファイルの内容を読み、その説明を <code>.golem.md</code> として書き出します。
+      生成後は手で調整でき、「〜は含めない」のような除外条件を足すと、より意図どおりに分かれます。
+    </p>
   </section>
 
   <!-- ===================== 06 CONFIG ===================== -->

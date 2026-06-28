@@ -268,21 +268,16 @@ def resolve_claude(cfg: dict) -> str | None:
     return None
 
 
-def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
+def _invoke_claude(prompt: str, cfg: dict) -> tuple[str | None, str]:
+    """Run `claude -p` with `prompt`. Returns (text, error).
+
+    On success, `text` is the model's reply (unwrapped from the JSON envelope)
+    and `error` is "". On failure, `text` is None and `error` explains why.
+    """
     claude = resolve_claude(cfg)
     if claude is None:
-        return {"folder": None, "confidence": 0.0, "error": True,
-                "reason": "claude binary not found — set claude_bin in config.toml"}
-    folders_block = "\n".join(
-        f"- {f.name}: {folder_profile(f)}" for f in folders
-    )
-    prompt = PROMPT_TEMPLATE.format(file_block=file_block, folders_block=folders_block)
-    argv = [
-        claude, "-p",
-        "--model", cfg["model"],
-        "--output-format", "json",
-        "--allowedTools", "",
-    ]
+        return None, "claude binary not found — set claude_bin in config.toml"
+    argv = [claude, "-p", "--model", cfg["model"], "--output-format", "json", "--allowedTools", ""]
     # launchd/cron run with a minimal PATH; make sure the dir holding `claude`
     # (and its sibling `node`) is reachable so the CLI can actually launch.
     env = os.environ.copy()
@@ -293,10 +288,9 @@ def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
             timeout=cfg["claude_timeout"], env=env,
         )
     except (subprocess.TimeoutExpired, OSError) as e:
-        return {"folder": None, "confidence": 0.0, "error": True, "reason": f"claude error: {e}"}
-
+        return None, f"claude error: {e}"
     if r.returncode != 0:
-        return {"folder": None, "confidence": 0.0, "error": True, "reason": f"claude exit {r.returncode}: {r.stderr[:200]}"}
+        return None, f"claude exit {r.returncode}: {r.stderr[:200]}"
 
     # `--output-format json` wraps the model reply; the text is under "result".
     inner = r.stdout
@@ -306,6 +300,17 @@ def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
             inner = outer.get("result", r.stdout)
     except json.JSONDecodeError:
         pass
+    return inner, ""
+
+
+def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
+    folders_block = "\n".join(
+        f"- {f.name}: {folder_profile(f)}" for f in folders
+    )
+    prompt = PROMPT_TEMPLATE.format(file_block=file_block, folders_block=folders_block)
+    inner, err = _invoke_claude(prompt, cfg)
+    if inner is None:
+        return {"folder": None, "confidence": 0.0, "error": True, "reason": err}
     try:
         parsed = _parse_classification(inner)
     except (json.JSONDecodeError, ValueError):
@@ -520,6 +525,110 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
     if on_no_match == "keep":
         return None
     return root / on_no_match
+
+
+# --------------------------------------------------------------------------- #
+# Profile generation: write a `.golem.md` describing what each folder holds, so
+# classification has an explicit rubric instead of guessing from filenames.
+# --------------------------------------------------------------------------- #
+
+PROFILE_PROMPT = """次のフォルダの中身（ファイル名と内容の抜粋）を見て、このフォルダには\
+「どんな種類のファイルを入れる場所か」を日本語で簡潔に説明してください。
+
+# フォルダ名
+{folder_name}
+
+# 中にあるもの
+{contents}
+
+# 出力
+説明文だけを1〜2文で出力してください。前置き・記号・引用符・コードブロックは付けないでください。
+"""
+
+
+def _folder_digest(folder: Path, cfg: dict) -> str:
+    """A compact view of a folder: up to 20 names + short snippets of a few files."""
+    try:
+        items = [c for c in sorted(folder.iterdir()) if not c.name.startswith(".")]
+    except OSError:
+        return ""
+    names = [c.name + ("/" if c.is_dir() else "") for c in items[:20]]
+    files = [c for c in items if c.is_file()]
+    snippets = []
+    snip_cfg = {**cfg, "max_chars": 300, "enable_ocr": False}
+    for c in files[:5]:
+        body = extract_text(c, snip_cfg).strip()
+        snippets.append(f"## {c.name}\n{body}")
+    out = "ファイル一覧:\n" + "\n".join(f"- {n}" for n in names)
+    if snippets:
+        out += "\n\n内容の抜粋:\n" + "\n\n".join(snippets)
+    return out
+
+
+def generate_profile(folder: Path, cfg: dict) -> tuple[str | None, str]:
+    """Return (description, error). description is None on empty/failed folders."""
+    try:
+        has_content = any(not c.name.startswith(".") for c in folder.iterdir())
+    except OSError as e:
+        return None, str(e)
+    if not has_content:
+        return None, "empty"
+
+    digest = _folder_digest(folder, cfg)[: cfg["max_chars"]]
+    prompt = PROFILE_PROMPT.format(folder_name=folder.name, contents=digest)
+    text, err = _invoke_claude(prompt, cfg)
+    if text is None:
+        return None, err
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.strip("`").strip()
+    text = text.strip().strip('"').strip("「」").strip()
+    if not text:
+        return None, "empty response"
+    return text, ""
+
+
+def cmd_describe(cfg: dict, roots: list[Path], force: bool) -> int:
+    done = skipped = errors = 0
+    for root in roots:
+        if not root.is_dir():
+            print(f"[skip] not a directory: {root}", file=sys.stderr)
+            continue
+        folders = candidate_folders(root, cfg)
+        if not folders:
+            print(f"[skip] no candidate folders under {root}")
+            continue
+        for folder in folders:
+            profile = folder / ".golem.md"
+            if profile.is_file() and not force:
+                skipped += 1
+                print(f"[skip] {folder.name}/  (.golem.md あり — 上書きは --force)")
+                continue
+            text, err = generate_profile(folder, cfg)
+            if text is None:
+                if err == "empty":
+                    skipped += 1
+                    print(f"[skip] {folder.name}/  (空フォルダ — サンプルが無く生成できません)")
+                else:
+                    errors += 1
+                    print(f"[error] {folder.name}/  — {err}")
+                continue
+            done += 1
+            if cfg["dry_run"]:
+                print(f"[dry-run] {folder.name}/.golem.md  ←  {text}")
+            else:
+                try:
+                    profile.write_text(text + "\n", encoding="utf-8")
+                except OSError as e:
+                    done -= 1
+                    errors += 1
+                    print(f"[error] {folder.name}/  — write failed: {e}")
+                    continue
+                print(f"[write] {folder.name}/.golem.md  ←  {text}")
+
+    verb = "would write" if cfg["dry_run"] else "wrote"
+    print(f"\n[describe] {verb} {done} · skipped {skipped} · errors {errors}")
+    return 0
 
 
 def _notify(cfg: dict, title: str, text: str) -> None:
@@ -749,13 +858,15 @@ def _acquire_lock():
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="golem", description="copper-golem: AI file sorter")
     p.add_argument("command", nargs="?", default="once",
-                   choices=["once", "undo", "install", "uninstall"],
+                   choices=["once", "undo", "describe", "install", "uninstall"],
                    help="once: scan & sort (default); undo: revert the last batch; "
+                        "describe: write a .golem.md for each category folder; "
                         "install/uninstall: manage the launchd watcher")
     p.add_argument("--config", help="path to config.toml")
     p.add_argument("--root", action="append", help="override watch root (repeatable)")
-    p.add_argument("--dry-run", action="store_true", help="force dry-run (no moves)")
-    p.add_argument("--apply", action="store_true", help="force live mode (perform moves)")
+    p.add_argument("--dry-run", action="store_true", help="force dry-run (no moves / no writes)")
+    p.add_argument("--apply", action="store_true", help="force live mode (perform moves / writes)")
+    p.add_argument("--force", action="store_true", help="describe: overwrite existing .golem.md")
     args = p.parse_args(argv)
 
     try:
@@ -777,6 +888,8 @@ def main(argv: list[str] | None = None) -> int:
         else [Path(r).expanduser() for r in cfg["watch_roots"]]
     )
 
+    if args.command == "describe":
+        return cmd_describe(cfg, roots, force=args.force)
     if args.command == "install":
         return cmd_install(cfg, [str(r) for r in roots], args.config)
     if args.command == "uninstall":

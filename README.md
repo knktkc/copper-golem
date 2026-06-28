@@ -68,6 +68,18 @@ cp config.example.toml ~/.config/copper-golem/config.toml
 
 **振り分け先フォルダは自分で作ります。** 監視ルート直下に `請求書/` `写真/` などを用意してください。フォルダに `.golem.md` を置くと、その説明文が分類のヒントになります（無くても中のファイル名から推測します）。
 
+### `.golem.md` を自動生成する
+
+各フォルダにすでに入っているファイルの内容から、「何を入れる場所か」の説明を AI に書かせて `.golem.md` として保存できます。
+
+```bash
+python3 golem.py describe --dry-run    # 生成内容を確認（書き込まない）
+python3 golem.py describe --apply      # 各カテゴリフォルダに .golem.md を書く
+python3 golem.py describe --apply --force   # 既存の .golem.md も上書き
+```
+
+既に `.golem.md` があるフォルダ・空のフォルダはスキップします。生成後は内容を見て、必要なら手で書き換えてください（「〜は含めない」などの除外条件を足すと精度が上がります）。
+
 ## 使い方
 
 ### まず手動で試す（推奨）
