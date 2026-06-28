@@ -47,6 +47,7 @@ DEFAULT_CONFIG: dict = {
     "notify": True,                  # show a desktop notification after each live run
     "notify_sound": True,            # play a sound + ignore Do-Not-Disturb (so it's hard to miss)
     "interval_seconds": 0,           # also sweep every N seconds (0 = only when files change)
+    "cache_no_match": True,          # remember "no fit" files; don't re-check until a folder is added
 }
 
 DEFAULT_CONFIG_PATH = Path("~/.config/copper-golem/config.toml").expanduser()
@@ -55,6 +56,7 @@ STATE_DIR = Path("~/.local/state/copper-golem").expanduser()
 MOVES_LOG = STATE_DIR / "moves.jsonl"
 UNDONE_LOG = STATE_DIR / "undone.txt"
 LOCK_FILE = STATE_DIR / "golem.lock"
+NOMATCH_CACHE = STATE_DIR / "nomatch.json"
 
 
 def load_config(explicit: str | None) -> dict:
@@ -358,6 +360,37 @@ def append_move(batch: str, src: Path, dst: Path, decision: dict) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# No-match cache: remember files that didn't fit any folder, so periodic sweeps
+# don't re-ask Claude (and re-notify) about the same files every time. Keyed per
+# root by the candidate-folder set — adding a folder invalidates it so kept
+# files get one fresh look.
+# --------------------------------------------------------------------------- #
+
+def _file_sig(path: Path) -> str:
+    try:
+        st = path.stat()
+        return f"{st.st_mtime_ns}:{st.st_size}"
+    except OSError:
+        return ""
+
+
+def load_nomatch_cache() -> dict:
+    try:
+        data = json.loads(NOMATCH_CACHE.read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_nomatch_cache(cache: dict) -> None:
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        NOMATCH_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
 # Core flow
 # --------------------------------------------------------------------------- #
 
@@ -368,14 +401,21 @@ def _coerce_conf(value) -> float:
         return 0.0
 
 
-def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int, int, int]:
+def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -> tuple[int, int, int, int]:
     """Scan one root and sort its files. Returns (considered, moved, kept, errors).
 
     Each considered file lands in exactly one of moved / kept / errors. A file
     that matches a category is `moved`; a no-match file is `kept` (left in place,
     or relocated to the `on_no_match` folder — still counted as kept, and still
     recorded so `undo` can restore it); failures are `errors`.
+
+    `cache` is the persistent no-match cache (see load_nomatch_cache). In live
+    mode, files previously judged "no fit" are skipped silently — no Claude call,
+    no notification — until their content changes or a new candidate folder
+    appears. dry-run ignores the cache so it always shows the full picture.
     """
+    if cache is None:
+        cache = {}
     if not root.is_dir():
         print(f"[skip] not a directory: {root}", file=sys.stderr)
         return (0, 0, 0, 0)
@@ -385,13 +425,28 @@ def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int, int, int]
         print(f"[skip] no candidate folders under {root}")
         return (0, 0, 0, 0)
 
+    entries = sorted(root.iterdir())
+    existing_files = {e.name for e in entries if e.is_file()}
+
+    use_cache = (not cfg["dry_run"]) and cfg.get("cache_no_match", True)
+    kept_cache = None
+    if use_cache:
+        rc = cache.setdefault(str(root), {"folders": [], "kept": {}})
+        current = sorted(f.name for f in folders)
+        if rc.get("folders") != current:        # candidate set changed → re-look
+            rc["folders"] = current
+            rc["kept"] = {}
+        kept_cache = rc["kept"]
+
     considered = moved = kept = errors = 0
-    for entry in sorted(root.iterdir()):
+    for entry in entries:
         if not entry.is_file() or is_excluded(entry, cfg):
             continue
         if not is_stable(entry, cfg):
             print(f"[wait] {entry.name}  (modified <{cfg['stability_seconds']}s ago — will retry next run)")
             continue
+        if kept_cache is not None and kept_cache.get(entry.name) == _file_sig(entry):
+            continue  # already judged "no fit" for this folder set — skip silently
 
         considered += 1
         file_block = extract_text(entry, cfg)
@@ -417,6 +472,8 @@ def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int, int, int]
             target = _no_match_target(root, cfg)
             if target is None:
                 kept += 1
+                if kept_cache is not None:
+                    kept_cache[entry.name] = _file_sig(entry)  # remember: don't re-check
                 print(f"[keep] {entry.name}  ({reason})")
                 continue
             dest_dir, is_match = target, False
@@ -441,12 +498,19 @@ def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int, int, int]
             continue
 
         append_move(batch, entry, dest, decision)
+        if kept_cache is not None:
+            kept_cache.pop(entry.name, None)  # it left the root
         if is_match:
             moved += 1
             print(f"[move] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
         else:
             kept += 1
             print(f"[keep] {entry.name}  ->  {dest_dir.name}/  ({reason})")
+
+    # Forget cached files that are no longer at the root (moved out, deleted).
+    if kept_cache is not None:
+        for name in [k for k in kept_cache if k not in existing_files]:
+            del kept_cache[name]
 
     return (considered, moved, kept, errors)
 
@@ -488,10 +552,14 @@ def _notify(cfg: dict, title: str, text: str) -> None:
 def cmd_once(cfg: dict, roots: list[Path]) -> int:
     batch = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%f")
     mode = "dry-run" if cfg["dry_run"] else "live"
+    use_cache = (not cfg["dry_run"]) and cfg.get("cache_no_match", True)
+    cache = load_nomatch_cache() if use_cache else {}
     tc = tm = tk = te = 0
     for root in roots:
-        c, m, k, e = process_root(root, cfg, batch)
+        c, m, k, e = process_root(root, cfg, batch, cache)
         tc += c; tm += m; tk += k; te += e
+    if use_cache:
+        save_nomatch_cache(cache)
 
     # Stay quiet on empty sweeps so periodic runs don't flood the log.
     if tc or te:

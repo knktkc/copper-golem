@@ -56,6 +56,7 @@ class StateDirMixin(unittest.TestCase):
             mock.patch.object(golem, "MOVES_LOG", state / "moves.jsonl"),
             mock.patch.object(golem, "UNDONE_LOG", state / "undone.txt"),
             mock.patch.object(golem, "LOCK_FILE", state / "golem.lock"),
+            mock.patch.object(golem, "NOMATCH_CACHE", state / "nomatch.json"),
         ]
         for p in self._patches:
             p.start()
@@ -432,6 +433,103 @@ class TestProcessRoot(StateDirMixin):
             considered, moved, _, _ = golem.process_root(root, cfg(dry_run=False), "b")
         self.assertEqual(considered, 1)  # crdownload skipped
         self.assertTrue((root / "x.crdownload").exists())
+
+    # ---- no-match cache (regression suite for the "stop re-checking" feature) ----
+
+    def _counting(self, mapping):
+        dec = self._decider(mapping)
+        calls = {"n": 0}
+
+        def counting(file_block, folders, c):
+            calls["n"] += 1
+            return dec(file_block, folders, c)
+        return counting, calls
+
+    def test_no_match_cached_and_skipped_next_run(self):
+        root = self._root(files=["m.txt"])
+        counting, calls = self._counting({"m.txt": {"folder": None, "confidence": 0.0}})
+        cache = {}
+        with mock.patch.object(golem, "classify", counting), redirect_stdout(io.StringIO()):
+            r1 = golem.process_root(root, cfg(dry_run=False), "b1", cache)
+            r2 = golem.process_root(root, cfg(dry_run=False), "b2", cache)
+        self.assertEqual(r1, (1, 0, 1, 0))     # first run: classified, kept
+        self.assertEqual(r2, (0, 0, 0, 0))     # second run: skipped silently
+        self.assertEqual(calls["n"], 1)        # Claude called only once
+
+    def test_new_folder_invalidates_cache(self):
+        root = self._root(files=["m.txt"])
+        counting, calls = self._counting({"m.txt": {"folder": None, "confidence": 0.0}})
+        cache = {}
+        with mock.patch.object(golem, "classify", counting), redirect_stdout(io.StringIO()):
+            golem.process_root(root, cfg(dry_run=False), "b1", cache)
+            (root / "C").mkdir()               # a new candidate folder appears
+            r = golem.process_root(root, cfg(dry_run=False), "b2", cache)
+        self.assertEqual(calls["n"], 2)        # re-evaluated after folder added
+        self.assertEqual(r, (1, 0, 1, 0))
+
+    def test_modified_kept_file_is_rechecked(self):
+        root = self._root(files=["m.txt"])
+        counting, calls = self._counting({"m.txt": {"folder": None, "confidence": 0.0}})
+        cache = {}
+        with mock.patch.object(golem, "classify", counting), redirect_stdout(io.StringIO()):
+            golem.process_root(root, cfg(dry_run=False), "b1", cache)
+            f = root / "m.txt"
+            st = f.stat()
+            # Different mtime (sig change), but in the past so it stays "stable".
+            os.utime(f, (st.st_atime, st.st_mtime - 100))
+            golem.process_root(root, cfg(dry_run=False), "b2", cache)
+        self.assertEqual(calls["n"], 2)        # rechecked because it changed
+
+    def test_dry_run_ignores_cache(self):
+        root = self._root(files=["m.txt"])
+        counting, calls = self._counting({"m.txt": {"folder": None, "confidence": 0.0}})
+        cache = {}
+        with mock.patch.object(golem, "classify", counting), redirect_stdout(io.StringIO()):
+            golem.process_root(root, cfg(dry_run=True), "b1", cache)
+            golem.process_root(root, cfg(dry_run=True), "b2", cache)
+        self.assertEqual(calls["n"], 2)        # dry-run always shows full picture
+        self.assertEqual(cache, {})            # and never writes the cache
+
+    def test_matched_file_not_cached(self):
+        root = self._root(files=["a.txt"])
+        dec = self._decider({"a.txt": {"folder": "A", "confidence": 0.9}})
+        cache = {}
+        with mock.patch.object(golem, "classify", dec), redirect_stdout(io.StringIO()):
+            golem.process_root(root, cfg(dry_run=False), "b1", cache)
+        self.assertNotIn("a.txt", cache[str(root)]["kept"])
+
+    def test_cache_disabled_rechecks_every_run(self):
+        root = self._root(files=["m.txt"])
+        counting, calls = self._counting({"m.txt": {"folder": None, "confidence": 0.0}})
+        cache = {}
+        with mock.patch.object(golem, "classify", counting), redirect_stdout(io.StringIO()):
+            golem.process_root(root, cfg(dry_run=False, cache_no_match=False), "b1", cache)
+            golem.process_root(root, cfg(dry_run=False, cache_no_match=False), "b2", cache)
+        self.assertEqual(calls["n"], 2)
+
+
+class TestNoMatchCacheEndToEnd(StateDirMixin):
+    """cmd_once persists the cache across runs: a steady sweep stays silent."""
+
+    def test_second_sweep_is_silent_and_does_not_renotify(self):
+        root = self.tmp / "root"
+        (root / "A").mkdir(parents=True)
+        (root / "m.txt").write_text("unsortable", encoding="utf-8")
+
+        def no_match(file_block, folders, c):
+            return {"folder": None, "confidence": 0.0, "reason": "n/a"}
+
+        c = dict(golem.DEFAULT_CONFIG)
+        c.update(dry_run=False, stability_seconds=0, notify=True)
+
+        with mock.patch.object(golem, "classify", side_effect=no_match) as classify:
+            with mock.patch.object(golem, "_notify") as notify:
+                with redirect_stdout(io.StringIO()):
+                    golem.cmd_once(c, [root])   # 1st: kept + notify
+                    golem.cmd_once(c, [root])   # 2nd: cached -> silent
+        self.assertEqual(classify.call_count, 1)  # classified only once total
+        self.assertEqual(notify.call_count, 1)    # notified only once total
+        self.assertTrue(golem.NOMATCH_CACHE.is_file())
 
 
 # --------------------------------------------------------------------------- #

@@ -61,3 +61,9 @@ notify_sound = true
 # Catches files skipped during the stability wait, or added before a matching
 # category folder existed. 300 = every 5 minutes. Empty sweeps are silent.
 interval_seconds = 0
+
+# Remember files that didn't fit any folder, and skip them on later sweeps —
+# no repeated Claude calls, no repeated notifications. A cached file is
+# re-checked only if its content changes, or when a new category folder appears
+# (which might now be its home). Set false to re-check every run.
+cache_no_match = true
