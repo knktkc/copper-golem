@@ -1,0 +1,489 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>copper-golem — 中身で分けるファイル仕分けツール</title>
+<style>
+  :root{
+    --paper:#efece4;
+    --panel:#e7e3d8;
+    --panel-2:#eae6dc;
+    --ink:#211c17;
+    --ink-soft:#5b5249;
+    --ink-faint:#8a8175;
+    --copper:#a85a32;
+    --copper-deep:#854122;
+    --patina:#2f6f60;
+    --rule:#d6cfc1;
+    --term-bg:#221d18;
+    --term-ink:#e9e2d4;
+    --term-dim:#9b9388;
+    --serif:"Iowan Old Style","Hiragino Mincho ProN","Yu Mincho","YuMincho",
+            "Palatino Linotype",Palatino,"Hoefler Text",Georgia,serif;
+    --sans:-apple-system,"Hiragino Kaku Gothic ProN","Yu Gothic","Noto Sans JP",
+            "Segoe UI",system-ui,sans-serif;
+    --mono:"SF Mono","JetBrains Mono",Menlo,Consolas,"Liberation Mono",monospace;
+  }
+  *{box-sizing:border-box;}
+  html{scroll-behavior:smooth;}
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:var(--sans);
+    font-size:17px;
+    line-height:1.85;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  .topbar{height:4px;background:linear-gradient(90deg,var(--copper-deep),var(--copper) 60%,var(--patina));}
+  .wrap{max-width:880px;margin:0 auto;padding:0 28px;}
+
+  /* ---- typographic helpers ---- */
+  .eyebrow{
+    font-family:var(--mono);
+    font-size:12px;
+    letter-spacing:.22em;
+    text-transform:uppercase;
+    color:var(--copper-deep);
+    margin:0 0 14px;
+  }
+  h1,h2,h3{font-family:var(--serif);font-weight:600;line-height:1.25;letter-spacing:.01em;}
+  .sec-num{font-family:var(--mono);color:var(--ink-faint);font-size:13px;letter-spacing:.1em;}
+  p{margin:0 0 18px;}
+  .lead{color:var(--ink-soft);}
+  a{color:var(--copper-deep);text-decoration:none;border-bottom:1px solid var(--rule);}
+  a:hover{border-color:var(--copper);}
+  code{font-family:var(--mono);font-size:.86em;background:var(--panel);
+       padding:.08em .4em;border-radius:3px;color:var(--copper-deep);}
+
+  /* ---- hero ---- */
+  header.hero{padding:78px 0 56px;border-bottom:1px solid var(--rule);}
+  header.hero h1{font-size:64px;margin:0 0 6px;letter-spacing:-.01em;}
+  header.hero .mark{color:var(--copper-deep);}
+  .tagline{font-family:var(--serif);font-size:25px;line-height:1.5;margin:18px 0 14px;color:var(--ink);}
+  header.hero .lead{font-size:18px;max-width:60ch;}
+  .meta-row{
+    display:flex;flex-wrap:wrap;gap:10px 22px;margin-top:28px;
+    font-family:var(--mono);font-size:12.5px;letter-spacing:.08em;color:var(--ink-soft);
+  }
+  .meta-row span{display:inline-flex;align-items:center;}
+  .meta-row span::before{content:"";width:6px;height:6px;margin-right:9px;
+       background:var(--patina);transform:rotate(45deg);}
+
+  /* ---- sections ---- */
+  section{padding:64px 0;border-bottom:1px solid var(--rule);}
+  .sec-head{margin-bottom:34px;}
+  .sec-head h2{font-size:34px;margin:8px 0 0;}
+  .sec-head .sub{color:var(--ink-soft);margin-top:12px;max-width:64ch;}
+
+  /* ---- inbox diagram ---- */
+  .filetree{
+    font-family:var(--mono);font-size:14px;line-height:2.1;
+    background:var(--panel-2);border:1px solid var(--rule);border-left:3px solid var(--copper);
+    padding:22px 26px;border-radius:4px;color:var(--ink);white-space:pre;overflow-x:auto;
+  }
+  .filetree .note{color:var(--copper-deep);}
+  .filetree .dim{color:var(--ink-faint);}
+
+  /* ---- comparison table ---- */
+  .cmp{width:100%;border-collapse:collapse;margin-top:6px;}
+  .cmp th,.cmp td{text-align:left;padding:15px 16px;border-bottom:1px solid var(--rule);vertical-align:top;}
+  .cmp thead th{font-family:var(--mono);font-size:12px;letter-spacing:.12em;text-transform:uppercase;
+       color:var(--ink-faint);font-weight:500;}
+  .cmp tbody td:first-child{color:var(--ink-soft);width:42%;}
+  .cmp tbody td:last-child{color:var(--ink);}
+  .arrowcol{color:var(--copper);font-family:var(--mono);width:1%;padding-left:0;padding-right:0;}
+
+  /* ---- principle callout ---- */
+  .callout{
+    background:var(--ink);color:var(--paper);border-radius:6px;
+    padding:34px 36px;margin:6px 0 34px;
+  }
+  .callout .eyebrow{color:#d79c79;}
+  .callout p{margin:0;font-family:var(--serif);font-size:22px;line-height:1.6;}
+  .callout p strong{color:#e6b08a;font-weight:600;}
+
+  /* ---- pipeline ---- */
+  .pipe{display:flex;flex-wrap:wrap;align-items:stretch;gap:0;margin-top:10px;}
+  .pstep{flex:1 1 0;min-width:150px;background:var(--panel-2);border:1px solid var(--rule);
+       padding:18px 18px;}
+  .pstep + .pstep{border-left:none;}
+  .pstep .k{font-family:var(--mono);font-size:11px;letter-spacing:.14em;text-transform:uppercase;
+       color:var(--copper-deep);display:block;margin-bottom:8px;}
+  .pstep .t{font-family:var(--serif);font-size:18px;}
+  .pstep .d{font-size:14px;color:var(--ink-soft);line-height:1.7;margin-top:6px;}
+
+  /* ---- feature grid ---- */
+  .features{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--rule);
+       border:1px solid var(--rule);border-radius:6px;overflow:hidden;}
+  .feat{background:var(--paper);padding:28px 28px 26px;}
+  .feat .tag{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+       color:var(--patina);}
+  .feat h3{font-size:21px;margin:10px 0 10px;}
+  .feat p{font-size:15.5px;line-height:1.78;color:var(--ink-soft);margin:0;}
+  .feat ul{margin:12px 0 0;padding-left:18px;font-size:14.5px;color:var(--ink-soft);line-height:1.8;}
+  .feat ul li{margin-bottom:3px;}
+
+  /* ---- terminal blocks ---- */
+  .term{
+    background:var(--term-bg);color:var(--term-ink);font-family:var(--mono);font-size:13.5px;
+    line-height:1.95;border-radius:6px;padding:20px 22px;overflow-x:auto;margin:0 0 20px;
+  }
+  .term .c{color:#b9b0a0;}      /* comment */
+  .term .p{color:#d79c79;}      /* prompt/accent */
+  .term .o{color:#8fb6a9;}      /* output-ish */
+  .term b{color:#fff;font-weight:600;}
+
+  .twocol{display:grid;grid-template-columns:1fr 1fr;gap:20px;}
+
+  /* ---- config table ---- */
+  .cfg{width:100%;border-collapse:collapse;font-size:15px;}
+  .cfg th,.cfg td{text-align:left;padding:13px 14px;border-bottom:1px solid var(--rule);vertical-align:top;}
+  .cfg thead th{font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;
+       color:var(--ink-faint);font-weight:500;}
+  .cfg td.key{font-family:var(--mono);font-size:13px;color:var(--copper-deep);white-space:nowrap;}
+  .cfg td.def{font-family:var(--mono);font-size:12.5px;color:var(--ink-faint);white-space:nowrap;}
+  .cfg td.desc{color:var(--ink-soft);}
+
+  /* ---- status legend ---- */
+  .legend{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:6px;}
+  .lg{border:1px solid var(--rule);border-radius:5px;padding:16px 18px;background:var(--panel-2);}
+  .lg .lbl{font-family:var(--mono);font-size:13px;font-weight:600;}
+  .lg.move .lbl{color:var(--patina);}
+  .lg.keep .lbl{color:var(--copper-deep);}
+  .lg.err  .lbl{color:#a23b2e;}
+  .lg p{font-size:14px;color:var(--ink-soft);margin:8px 0 0;line-height:1.7;}
+
+  ul.reqs{list-style:none;padding:0;margin:0;}
+  ul.reqs li{padding:13px 0;border-bottom:1px solid var(--rule);display:flex;gap:16px;align-items:baseline;}
+  ul.reqs li:last-child{border-bottom:none;}
+  ul.reqs .r-k{font-family:var(--mono);font-size:13px;color:var(--copper-deep);min-width:160px;}
+  ul.reqs .r-v{color:var(--ink-soft);font-size:15px;}
+
+  footer{padding:54px 0 70px;color:var(--ink-soft);}
+  footer .name{font-family:var(--serif);font-size:22px;color:var(--ink);}
+  footer .fmeta{font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;margin-top:12px;color:var(--ink-faint);}
+
+  @media (max-width:680px){
+    body{font-size:16px;}
+    header.hero h1{font-size:44px;}
+    .tagline{font-size:21px;}
+    .sec-head h2{font-size:27px;}
+    .features{grid-template-columns:1fr;}
+    .twocol{grid-template-columns:1fr;}
+    .legend{grid-template-columns:1fr;}
+    .pstep + .pstep{border-left:1px solid var(--rule);}
+    ul.reqs li{flex-direction:column;gap:2px;}
+  }
+</style>
+</head>
+<body>
+<div class="topbar"></div>
+
+<div class="wrap">
+
+  <!-- ===================== HERO ===================== -->
+  <header class="hero">
+    <p class="eyebrow">File Sorter for macOS</p>
+    <h1><span class="mark">copper</span>-golem</h1>
+    <p class="tagline">放り込んだファイルを、中身を読んで、ふさわしいフォルダへ。</p>
+    <p class="lead">
+      Minecraft の銅ゴーレムが落ちたアイテムを同じ物のチェストへ仕分けるように、
+      監視フォルダに置かれたファイルを AI が内容から判断し、同じ階層のカテゴリフォルダへ静かに移動します。
+      合うフォルダが見つからなければ、無理に動かさずそのまま残します。
+    </p>
+    <div class="meta-row">
+      <span>Python 3.11+</span>
+      <span>外部ライブラリ依存ゼロ</span>
+      <span>claude CLI を分類器に</span>
+      <span>APIキー不要</span>
+      <span>MIT License</span>
+    </div>
+  </header>
+
+  <!-- ===================== 01 CONCEPT ===================== -->
+  <section id="concept">
+    <div class="sec-head">
+      <span class="sec-num">01</span>
+      <p class="eyebrow" style="margin-top:6px;">Concept</p>
+      <h2>銅ゴーレムの挙動を、ファイル整理に翻訳する</h2>
+      <p class="sub">
+        銅ゴーレムは、近くに落ちたアイテムを拾い、同じ物がすでに入ったチェストへ優先して仕分けるモブです。
+        該当するチェストが無ければ、無理に押し込まず持て余します。この振る舞いをそのままファイルへ移しました。
+      </p>
+    </div>
+
+    <table class="cmp">
+      <thead>
+        <tr><th>銅ゴーレム</th><th></th><th>copper-golem</th></tr>
+      </thead>
+      <tbody>
+        <tr><td>落ちているアイテムを拾う</td><td class="arrowcol">→</td><td>監視フォルダ直下のファイルを拾う</td></tr>
+        <tr><td>同じ物が入ったチェストへ入れる</td><td class="arrowcol">→</td><td>似た内容のファイルがあるフォルダへ移す</td></tr>
+        <tr><td>合うチェストが無ければ持て余す</td><td class="arrowcol">→</td><td>合うフォルダが無ければ、その場に残す</td></tr>
+        <tr><td>斧で削れば元に戻せる</td><td class="arrowcol">→</td><td>いつでも止められ、undo で巻き戻せる</td></tr>
+      </tbody>
+    </table>
+
+    <p style="margin-top:30px;color:var(--ink-soft);">「同一階層限定」が原則です。仕分け対象のファイルと、振り分け先のカテゴリフォルダは、同じ階層に並びます。</p>
+
+    <div class="filetree">~/Downloads/inbox/
+  <span class="note">請求書_2026.pdf</span>      <span class="dim">← ここに置く（分類対象）</span>
+  請求書/   契約書/   写真/   <span class="dim">← 同じ階層の兄弟フォルダ ＝ 振り分け先</span>
+  _未分類/                <span class="dim">← 合うフォルダが無いものの退避先（任意）</span></div>
+  </section>
+
+  <!-- ===================== 02 HOW IT WORKS ===================== -->
+  <section id="how">
+    <div class="sec-head">
+      <span class="sec-num">02</span>
+      <p class="eyebrow" style="margin-top:6px;">How it works</p>
+      <h2>仕組み</h2>
+    </div>
+
+    <div class="callout">
+      <p class="eyebrow">設計の核心</p>
+      <p><strong>Claude にファイルを触らせない。</strong>スクリプトが中身を取り出して文章として渡し、
+      <code style="background:#3a322a;color:#e6b08a;">claude -p</code> は純粋な「分類器」としてだけ使う。
+      移動はすべてスクリプトが行う。だから速く、権限の扱いが単純で、安全。</p>
+    </div>
+
+    <div class="pipe">
+      <div class="pstep">
+        <span class="k">Step 1</span>
+        <span class="t">中身を抽出</span>
+        <p class="d">拡張子に応じて先頭の数千字をテキスト化。ファイル名も必ず添える。</p>
+      </div>
+      <div class="pstep">
+        <span class="k">Step 2</span>
+        <span class="t">候補を集める</span>
+        <p class="d">兄弟フォルダの一覧と、各フォルダの説明（<code>.golem.md</code> か中のファイル名）をまとめる。</p>
+      </div>
+      <div class="pstep">
+        <span class="k">Step 3</span>
+        <span class="t">AI が選ぶ</span>
+        <p class="d">内容と候補を Claude（Haiku）へ。<code>folder</code> と <code>confidence</code> を JSON で受け取る。</p>
+      </div>
+      <div class="pstep">
+        <span class="k">Step 4</span>
+        <span class="t">判定して移動</span>
+        <p class="d">確信度が閾値以上なら移動し記録。未満なら「該当なし」として残す。</p>
+      </div>
+    </div>
+
+    <p style="margin-top:28px;color:var(--ink-soft);">
+      Claude が返すのは <code>{"folder": "請求書", "confidence": 0.95, "reason": "…"}</code> のような JSON です。
+      <code>confidence</code> が設定した閾値を下回るものは、フォルダ名が返ってきても「該当なし」として扱い、誤った振り分けを抑えます。
+    </p>
+  </section>
+
+  <!-- ===================== 03 FEATURES ===================== -->
+  <section id="features">
+    <div class="sec-head">
+      <span class="sec-num">03</span>
+      <p class="eyebrow" style="margin-top:6px;">Features</p>
+      <h2>機能</h2>
+      <p class="sub">名前ではなく中身で判断し、安全に、そして見える形で仕分けます。</p>
+    </div>
+
+    <div class="features">
+      <div class="feat">
+        <span class="tag">Content-based</span>
+        <h3>中身で分類する</h3>
+        <p>拡張子だけでなく、ファイルの内容そのものを読んで判断します。名前が曖昧でも内容で振り分きます。</p>
+        <ul>
+          <li>テキスト・コード・CSV・JSON … 直接読み取り</li>
+          <li>PDF … 本文を抽出（pdftotext がある場合）</li>
+          <li>Word … テキストへ変換（textutil）</li>
+          <li>Excel（.xlsx / .xlsm）… シート名とセル文字列を抽出</li>
+          <li>画像 … ファイル名と画素サイズ（任意で OCR）</li>
+        </ul>
+      </div>
+
+      <div class="feat">
+        <span class="tag">No infra</span>
+        <h3>AIインフラもAPIキーも要らない</h3>
+        <p>すでに入っている claude CLI をそのまま分類器として呼び出します。サーバーもAPIキーも不要。
+        モデルは軽量・高速・低コストの Haiku で十分です。サブスク認証のまま動きます。</p>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Always-on</span>
+        <h3>即時＋定期の二段監視</h3>
+        <p>ファイルを置いた瞬間に動きます（launchd の WatchPaths）。
+        さらに任意で一定間隔のスイープも併用でき、ダウンロード完了待ちで見送った分や、
+        後からフォルダを作った分を確実に拾い直します。</p>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Golem-faithful</span>
+        <h3>合わなければ動かさない</h3>
+        <p>どのカテゴリにも合わないファイルは、その場に残します。
+        まとめて退避させたい場合は、専用の退避フォルダ名を指定することもできます。</p>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Safety first</span>
+        <h3>安全機構を厚く</h3>
+        <p>ファイルを勝手に動かす道具だからこそ、守りを固めています。</p>
+        <ul>
+          <li>dry-run が既定（最初は移動せず判定だけ）</li>
+          <li>すべての移動を記録し、undo で巻き戻せる</li>
+          <li>同名は上書きせず連番でリネーム</li>
+          <li>ダウンロード中・書き込み中のファイルは触らない</li>
+          <li>サブフォルダ自体は動かさない</li>
+        </ul>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Observable</span>
+        <h3>結果が見える</h3>
+        <p>動くたびに結果をデスクトップ通知でお知らせします（音つき・集中モードも越える）。
+        ログは「移動した」「残した」「エラー」を明確に区別し、実行ごとに件数を要約します。
+        ログを開かなくても状況が分かります。</p>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Portable</span>
+        <h3>設定だけで配布できる</h3>
+        <p>監視先や挙動はすべて TOML の設定ファイルにまとまり、コードにパスを埋め込みません。
+        クローンして設定を置けば、誰のマシンでもそのまま動きます。</p>
+      </div>
+
+      <div class="feat">
+        <span class="tag">Zero deps</span>
+        <h3>標準ライブラリのみ</h3>
+        <p>Python 3.11 以降の標準ライブラリだけで動きます。pip での追加インストールは不要。
+        Excel の読み取りも、画像のサイズ取得も、外部パッケージなしで行います。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 04 CLASSIFICATION ===================== -->
+  <section id="logic">
+    <div class="sec-head">
+      <span class="sec-num">04</span>
+      <p class="eyebrow" style="margin-top:6px;">Decision</p>
+      <h2>判定のしくみ</h2>
+      <p class="sub">
+        各ファイルは必ず「移動」「残置」「エラー」のいずれか一つに数えられます。
+        Claude の失敗（呼び出しエラーやタイムアウト）と、合うフォルダが無い「該当なし」を取り違えません。
+      </p>
+    </div>
+
+    <div class="legend">
+      <div class="lg move">
+        <span class="lbl">[move]</span>
+        <p>候補のフォルダに合致し、確信度が閾値以上。実際にそのフォルダへ移動し、記録します。</p>
+      </div>
+      <div class="lg keep">
+        <span class="lbl">[keep]</span>
+        <p>どのフォルダにも合わない、または確信度が低い。その場に残します（または退避先へ集約）。</p>
+      </div>
+      <div class="lg err">
+        <span class="lbl">[error]</span>
+        <p>claude の起動失敗・タイムアウト・出力不正、または移動の失敗。1件失敗しても処理は止まりません。</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== 05 SETUP ===================== -->
+  <section id="setup">
+    <div class="sec-head">
+      <span class="sec-num">05</span>
+      <p class="eyebrow" style="margin-top:6px;">Getting started</p>
+      <h2>使い方</h2>
+      <p class="sub">まず手動の dry-run で振り分け先を確かめ、納得してから常駐させる、という順序を推奨します。</p>
+    </div>
+
+    <div class="term"><span class="c"># 設定を用意して、監視フォルダや挙動を書く</span>
+mkdir -p ~/.config/copper-golem
+cp config.example.toml ~/.config/copper-golem/config.toml
+
+<span class="c"># まず手動で確認（何も移動しない）</span>
+python3 golem.py <span class="p">--dry-run</span>
+<span class="o">[dry-run] 請求書_2026.pdf  ->  請求書/  (conf=1.00)</span>
+<span class="o">[keep]    memo.txt        (no match · conf=0.05 · …)</span>
+
+<span class="c"># 納得したら、置いた瞬間に振り分ける常駐へ</span>
+<b>./install.sh</b></div>
+
+    <div class="twocol">
+      <div class="term"><span class="c"># 直前の振り分けを元に戻す</span>
+python3 golem.py <span class="p">undo</span>
+
+<span class="c"># その場で全件スキャン（移動を実行）</span>
+python3 golem.py <span class="p">--apply</span></div>
+      <div class="term"><span class="c"># 常駐を解除する</span>
+<b>./uninstall.sh</b>
+
+<span class="c"># 開発者向け：テスト一式（59件）</span>
+python3 -m unittest discover -s tests</div>
+    </div>
+
+    <p style="color:var(--ink-soft);">
+      振り分け先のフォルダは自分で用意します。監視ルート直下に <code>請求書/</code> <code>写真/</code> のように作るだけ。
+      フォルダに <code>.golem.md</code> を置いて「何を入れる場所か」を一文書くと、判定の手がかりになります。
+    </p>
+  </section>
+
+  <!-- ===================== 06 CONFIG ===================== -->
+  <section id="config">
+    <div class="sec-head">
+      <span class="sec-num">06</span>
+      <p class="eyebrow" style="margin-top:6px;">Configuration</p>
+      <h2>主な設定</h2>
+      <p class="sub"><code>~/.config/copper-golem/config.toml</code>。変更は保存するだけで次回の実行から反映されます（再インストール不要）。</p>
+    </div>
+
+    <div style="overflow-x:auto;">
+    <table class="cfg">
+      <thead><tr><th>キー</th><th>既定</th><th>説明</th></tr></thead>
+      <tbody>
+        <tr><td class="key">watch_roots</td><td class="def">["~/Downloads"]</td><td class="desc">監視するフォルダ。直下のファイルが対象。複数指定可。</td></tr>
+        <tr><td class="key">model</td><td class="def">claude-haiku-4-5</td><td class="desc">分類に使うモデル。軽量・高速・低コストの Haiku を既定に。</td></tr>
+        <tr><td class="key">dry_run</td><td class="def">true</td><td class="desc">true の間は移動せず判定だけ表示。慣れたら false に。</td></tr>
+        <tr><td class="key">on_no_match</td><td class="def">"keep"</td><td class="desc">該当なしの扱い。"keep" で残す、フォルダ名で退避先へ集約。</td></tr>
+        <tr><td class="key">confidence_threshold</td><td class="def">0.6</td><td class="desc">この確信度未満は「該当なし」とみなす。誤分類の抑制。</td></tr>
+        <tr><td class="key">stability_seconds</td><td class="def">20</td><td class="desc">直近この秒数に更新されたファイルは見送る（DL中対策）。</td></tr>
+        <tr><td class="key">interval_seconds</td><td class="def">0</td><td class="desc">変化時に加え一定間隔でもスイープ。0 で即時のみ。</td></tr>
+        <tr><td class="key">exclude_globs</td><td class="def">["*.crdownload", …]</td><td class="desc">無視するファイル名パターン。未完了DLや一時ファイル。</td></tr>
+        <tr><td class="key">enable_ocr</td><td class="def">false</td><td class="desc">画像を OCR で読む（tesseract が必要・低速）。</td></tr>
+        <tr><td class="key">notify / notify_sound</td><td class="def">true / true</td><td class="desc">実行後にデスクトップ通知。音つき・集中モードを越える。</td></tr>
+        <tr><td class="key">claude_bin</td><td class="def">""</td><td class="desc">claude の絶対パス。空なら自動検出。常駐で見つからない時に指定。</td></tr>
+      </tbody>
+    </table>
+    </div>
+  </section>
+
+  <!-- ===================== 07 REQUIREMENTS ===================== -->
+  <section id="requirements">
+    <div class="sec-head">
+      <span class="sec-num">07</span>
+      <p class="eyebrow" style="margin-top:6px;">Requirements</p>
+      <h2>必要なもの</h2>
+    </div>
+    <ul class="reqs">
+      <li><span class="r-k">macOS</span><span class="r-v">常駐に launchd を使用。</span></li>
+      <li><span class="r-k">claude CLI</span><span class="r-v">インストール済み・ログイン済み（サブスク認証で可）。これが分類の頭脳。</span></li>
+      <li><span class="r-k">Python 3.11+</span><span class="r-v">標準ライブラリのみ。追加インストール不要。</span></li>
+      <li><span class="r-k">terminal-notifier</span><span class="r-v">推奨。新しめの macOS では常駐からの通知に必要（無くてもログには残る）。</span></li>
+      <li><span class="r-k">pdftotext / tesseract</span><span class="r-v">任意。あれば PDF 本文・画像 OCR も扱える。無くても劣化動作。</span></li>
+    </ul>
+  </section>
+
+  <!-- ===================== FOOTER ===================== -->
+  <footer>
+    <div class="name"><span style="color:var(--copper-deep);">copper</span>-golem</div>
+    <p style="max-width:60ch;margin:14px 0 0;color:var(--ink-soft);">
+      放り込めば、中身で読んで、ふさわしい場所へ。合わなければ、そのままに。
+      静かに働き、いつでも戻せる、ファイルのための銅ゴーレム。
+    </p>
+    <p class="fmeta">MIT License &nbsp;·&nbsp; Python standard library only &nbsp;·&nbsp; 59 unit tests &nbsp;·&nbsp; claude -p / Haiku</p>
+  </footer>
+
+</div>
+</body>
+</html>
