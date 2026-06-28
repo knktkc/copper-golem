@@ -26,6 +26,7 @@ import tomllib
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
 
 # --------------------------------------------------------------------------- #
 # Configuration
@@ -48,10 +49,7 @@ DEFAULT_CONFIG: dict = {
     "interval_seconds": 0,           # also sweep every N seconds (0 = only when files change)
 }
 
-CONFIG_PATHS = [
-    Path(os.environ.get("COPPER_GOLEM_CONFIG", "")),
-    Path("~/.config/copper-golem/config.toml").expanduser(),
-]
+DEFAULT_CONFIG_PATH = Path("~/.config/copper-golem/config.toml").expanduser()
 
 STATE_DIR = Path("~/.local/state/copper-golem").expanduser()
 MOVES_LOG = STATE_DIR / "moves.jsonl"
@@ -60,11 +58,27 @@ LOCK_FILE = STATE_DIR / "golem.lock"
 
 
 def load_config(explicit: str | None) -> dict:
+    """Merge a TOML config over the defaults.
+
+    An explicit path that doesn't exist is an error (so a typo'd --config never
+    silently falls back to sorting ~/Downloads). Without --config, try
+    $COPPER_GOLEM_CONFIG then ~/.config/copper-golem/config.toml; if neither
+    exists, run on defaults.
+    """
     cfg = dict(DEFAULT_CONFIG)
-    candidates = [Path(explicit)] if explicit else CONFIG_PATHS
+    if explicit:
+        p = Path(explicit).expanduser()
+        if not p.is_file():
+            raise FileNotFoundError(f"config file not found: {explicit}")
+        with open(p, "rb") as f:
+            cfg.update(tomllib.load(f))
+        return cfg
+
+    env = os.environ.get("COPPER_GOLEM_CONFIG", "").strip()
+    candidates = ([Path(env).expanduser()] if env else []) + [DEFAULT_CONFIG_PATH]
     for p in candidates:
-        if p and str(p) and p.expanduser().is_file():
-            with open(p.expanduser(), "rb") as f:
+        if p.is_file():
+            with open(p, "rb") as f:
                 cfg.update(tomllib.load(f))
             break
     return cfg
@@ -98,16 +112,23 @@ def _run_capture(argv: list[str], timeout: int = 30) -> str:
 
 
 def _xlsx_text(path: Path, max_chars: int) -> str:
-    """Pull sheet names + cell strings from an .xlsx/.xlsm (zip + XML, stdlib only)."""
+    """Pull sheet names + cell strings from an .xlsx/.xlsm (zip + XML, stdlib only).
+
+    Reads are bounded so a workbook with a huge sharedStrings table can't blow
+    up memory — we only need a representative sample for classification.
+    """
+    cap = max(max_chars, 0) * 8 + 4096  # bytes; generous vs. the char cap
     out: list[str] = []
     try:
         with zipfile.ZipFile(path) as z:
-            names = z.namelist()
+            names = set(z.namelist())
             if "xl/workbook.xml" in names:
-                wb = z.read("xl/workbook.xml").decode("utf-8", "replace")
+                with z.open("xl/workbook.xml") as fp:
+                    wb = fp.read(cap).decode("utf-8", "replace")
                 out += [f"sheet: {n}" for n in re.findall(r'<sheet[^>]*name="([^"]+)"', wb)]
             if "xl/sharedStrings.xml" in names:
-                ss = z.read("xl/sharedStrings.xml").decode("utf-8", "replace")
+                with z.open("xl/sharedStrings.xml") as fp:
+                    ss = fp.read(cap).decode("utf-8", "replace")
                 out += re.findall(r"<t[^>]*>(.*?)</t>", ss, re.S)
     except (zipfile.BadZipFile, OSError, KeyError):
         return ""
@@ -124,7 +145,9 @@ def extract_text(path: Path, cfg: dict) -> str:
     body = ""
     try:
         if ext in TEXT_EXTS:
-            body = path.read_text(encoding="utf-8", errors="replace")
+            # Bounded read: never pull a multi-GB .log/.csv fully into memory.
+            with open(path, "r", encoding="utf-8", errors="replace") as fh:
+                body = fh.read(max(cfg["max_chars"], 0))
         elif ext == ".pdf" and _have("pdftotext"):
             body = _run_capture(["pdftotext", "-l", "5", "-nopgbrk", str(path), "-"])
         elif ext in OFFICE_EXTS and _have("textutil"):
@@ -277,13 +300,17 @@ def classify(file_block: str, folders: list[Path], cfg: dict) -> dict:
     inner = r.stdout
     try:
         outer = json.loads(r.stdout)
-        inner = outer.get("result", r.stdout)
+        if isinstance(outer, dict):
+            inner = outer.get("result", r.stdout)
     except json.JSONDecodeError:
         pass
     try:
-        return _parse_classification(inner)
+        parsed = _parse_classification(inner)
     except (json.JSONDecodeError, ValueError):
         return {"folder": None, "confidence": 0.0, "error": True, "reason": "unparseable classifier output"}
+    if not isinstance(parsed, dict):
+        return {"folder": None, "confidence": 0.0, "error": True, "reason": "classifier output was not a JSON object"}
+    return parsed
 
 
 # --------------------------------------------------------------------------- #
@@ -334,16 +361,29 @@ def append_move(batch: str, src: Path, dst: Path, decision: dict) -> None:
 # Core flow
 # --------------------------------------------------------------------------- #
 
-def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int]:
-    """Returns (considered, moved)."""
+def _coerce_conf(value) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int, int, int]:
+    """Scan one root and sort its files. Returns (considered, moved, kept, errors).
+
+    Each considered file lands in exactly one of moved / kept / errors. A file
+    that matches a category is `moved`; a no-match file is `kept` (left in place,
+    or relocated to the `on_no_match` folder — still counted as kept, and still
+    recorded so `undo` can restore it); failures are `errors`.
+    """
     if not root.is_dir():
         print(f"[skip] not a directory: {root}", file=sys.stderr)
-        return (0, 0)
+        return (0, 0, 0, 0)
 
     folders = candidate_folders(root, cfg)
     if not folders:
         print(f"[skip] no candidate folders under {root}")
-        return (0, 0)
+        return (0, 0, 0, 0)
 
     considered = moved = kept = errors = 0
     for entry in sorted(root.iterdir()):
@@ -357,39 +397,56 @@ def process_root(root: Path, cfg: dict, batch: str) -> tuple[int, int]:
         file_block = extract_text(entry, cfg)
         decision = classify(file_block, folders, cfg)
 
-        # Distinguish a real failure from a clean "no folder fits".
+        # A real failure (claude missing/timeout/bad output) is NOT a "no match".
         if decision.get("error"):
             errors += 1
             print(f"[error] {entry.name}  — {decision.get('reason', 'unknown error')}")
             continue
 
         folder_name = decision.get("folder")
-        conf = decision.get("confidence") or 0.0
+        conf = _coerce_conf(decision.get("confidence"))
+        match = next((f for f in folders if f.name == folder_name), None) if folder_name else None
 
-        if not folder_name or conf < cfg["confidence_threshold"]:
-            kept += 1
+        if match is not None and conf >= cfg["confidence_threshold"]:
+            dest_dir, is_match, reason = match, True, ""
+        else:
+            if folder_name and match is None:
+                reason = f"unknown folder '{folder_name}'"
+            else:
+                reason = f"no match · conf={conf:.2f} · {decision.get('reason', '')}"
             target = _no_match_target(root, cfg)
             if target is None:
-                print(f"[keep] {entry.name}  (no match · conf={conf:.2f} · {decision.get('reason','')})")
-                continue
-            dest_dir = target
-        else:
-            match = next((f for f in folders if f.name == folder_name), None)
-            if match is None:
                 kept += 1
-                print(f"[keep] {entry.name}  (model named unknown folder '{folder_name}')")
+                print(f"[keep] {entry.name}  ({reason})")
                 continue
-            dest_dir = match
+            dest_dir, is_match = target, False
 
         dest = unique_dest(dest_dir / entry.name)
-        moved += 1
+
         if cfg["dry_run"]:
-            print(f"[dry-run] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
+            if is_match:
+                moved += 1
+                print(f"[dry-run] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
+            else:
+                kept += 1
+                print(f"[dry-run keep] {entry.name}  ->  {dest_dir.name}/  ({reason})")
             continue
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(entry), str(dest))
+
+        try:
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(entry), str(dest))
+        except OSError as ex:
+            errors += 1
+            print(f"[error] {entry.name}  — move failed: {ex}")
+            continue
+
         append_move(batch, entry, dest, decision)
-        print(f"[move] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
+        if is_match:
+            moved += 1
+            print(f"[move] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
+        else:
+            kept += 1
+            print(f"[keep] {entry.name}  ->  {dest_dir.name}/  ({reason})")
 
     return (considered, moved, kept, errors)
 
@@ -486,11 +543,17 @@ def cmd_undo(cfg: dict) -> int:
         print("Nothing to undo.")
         return 0
     target = batches[-1]
-    records = [
-        json.loads(l)
-        for l in MOVES_LOG.read_text(encoding="utf-8").splitlines()
-        if l.strip() and json.loads(l).get("batch") == target
-    ]
+    records = []
+    if MOVES_LOG.is_file():
+        for line in MOVES_LOG.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(rec, dict) and rec.get("batch") == target:
+                records.append(rec)
     restored = 0
     for rec in reversed(records):
         dst, src = Path(rec["dst"]), Path(rec["src"])
@@ -553,14 +616,19 @@ def cmd_install(cfg: dict, roots: list[str], config_path: str | None) -> int:
     prog = [sys.executable, str(Path(__file__).resolve()), "once"]
     if config_path:
         prog += ["--config", str(Path(config_path).expanduser().resolve())]
-    args_xml = "\n".join(f"\t\t<string>{a}</string>" for a in prog)
-    watch_xml = "\n".join(f"\t\t<string>{r}</string>" for r in roots)
-    interval = int(cfg.get("interval_seconds", 0) or 0)
+    # Escape every interpolated string — paths/usernames may contain &, <, >.
+    args_xml = "\n".join(f"\t\t<string>{_xml_escape(a)}</string>" for a in prog)
+    watch_xml = "\n".join(f"\t\t<string>{_xml_escape(r)}</string>" for r in roots)
+    try:
+        interval = int(cfg.get("interval_seconds", 0) or 0)
+    except (TypeError, ValueError):
+        interval = 0
     interval_xml = (f"\t<key>StartInterval</key>\n\t<integer>{interval}</integer>\n"
                     if interval > 0 else "")
 
-    plist = PLIST_TEMPLATE.format(label=label, args=args_xml, watch=watch_xml,
-                                  log=log, interval=interval_xml)
+    plist = PLIST_TEMPLATE.format(label=_xml_escape(label), args=args_xml,
+                                  watch=watch_xml, log=_xml_escape(str(log)),
+                                  interval=interval_xml)
     path = _plist_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["launchctl", "unload", str(path)], capture_output=True)  # reload if present
@@ -593,15 +661,21 @@ def cmd_uninstall(cfg: dict) -> int:
 # Entry point
 # --------------------------------------------------------------------------- #
 
+# Held for the whole process so the flock isn't released when _acquire_lock
+# returns. A bare local would be GC'd, closing the fd and dropping the lock.
+_LOCK_FH = None
+
+
 def _acquire_lock():
+    global _LOCK_FH
     STATE_DIR.mkdir(parents=True, exist_ok=True)
-    fh = open(LOCK_FILE, "w")
+    _LOCK_FH = open(LOCK_FILE, "w")
     try:
-        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(_LOCK_FH, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError:
         print("Another copper-golem run is in progress; exiting.", file=sys.stderr)
         sys.exit(0)
-    return fh  # keep open for process lifetime
+    return _LOCK_FH
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -616,7 +690,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--apply", action="store_true", help="force live mode (perform moves)")
     args = p.parse_args(argv)
 
-    cfg = load_config(args.config)
+    try:
+        cfg = load_config(args.config)
+    except (FileNotFoundError, tomllib.TOMLDecodeError) as e:
+        print(f"config error: {e}", file=sys.stderr)
+        return 2
     if args.dry_run:
         cfg["dry_run"] = True
     if args.apply:

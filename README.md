@@ -124,6 +124,14 @@ python3 golem.py undo
 - `.crdownload` などの**未完了ダウンロードは除外**、書き込み中のファイルは安定するまで待つ
 - 全移動を JSONL に記録し、`undo` で戻せる
 
+## 開発・テスト
+
+外部依存なしのユニットテスト（`claude` 呼び出し・launchd・通知はモック）が付属します。
+
+```bash
+python3 -m unittest discover -s tests
+```
+
 ## ライセンス
 
 MIT（`LICENSE`）。著作権者名は適宜書き換えてください。
