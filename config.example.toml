@@ -67,3 +67,9 @@ interval_seconds = 0
 # re-checked only if its content changes, or when a new category folder appears
 # (which might now be its home). Set false to re-check every run.
 cache_no_match = true
+
+# Write a report at each watched root listing the files that couldn't be sorted
+# and why, so you can see what's stuck. Regenerated each live run; removed when
+# nothing is left unsorted. Set to "" to disable. This file is never itself
+# classified.
+report_file = "_未分類レポート.md"

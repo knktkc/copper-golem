@@ -327,6 +327,14 @@
       </div>
 
       <div class="feat">
+        <span class="tag">Tells you why</span>
+        <h3>分けられない理由を知らせる</h3>
+        <p>どのカテゴリにも合わずに残ったファイルは、各監視フォルダの <code>_未分類レポート.md</code> に
+        理由と確信度つきで一覧化されます。ライブ実行のたびに更新され、残りが無くなれば自動で消えます。
+        これを見て、新しいフォルダを作る・<code>.golem.md</code> を調整する判断ができます。</p>
+      </div>
+
+      <div class="feat">
         <span class="tag">Safety first</span>
         <h3>安全機構を厚く</h3>
         <p>ファイルを勝手に動かす道具だからこそ、守りを固めています。</p>
@@ -422,7 +430,7 @@ python3 golem.py <span class="p">--apply</span></div>
       <div class="term"><span class="c"># 常駐を解除する</span>
 <b>./uninstall.sh</b>
 
-<span class="c"># 開発者向け：テスト一式（76件）</span>
+<span class="c"># 開発者向け：テスト一式（83件）</span>
 python3 -m unittest discover -s tests</div>
     </div>
 
@@ -475,6 +483,7 @@ python3 golem.py <span class="p">describe</span> <span class="p">--apply</span> 
         <tr><td class="key">enable_ocr</td><td class="def">false</td><td class="desc">画像を OCR で読む（tesseract が必要・低速）。</td></tr>
         <tr><td class="key">notify / notify_sound</td><td class="def">true / true</td><td class="desc">ライブ実行で何か動いたときにデスクトップ通知（dry-run では出ない）。音つき・集中モードを越える。</td></tr>
         <tr><td class="key">claude_bin</td><td class="def">""</td><td class="desc">claude の絶対パス。空なら自動検出。常駐で見つからない時に指定。</td></tr>
+        <tr><td class="key">report_file</td><td class="def">_未分類レポート.md</td><td class="desc">残ったファイルと理由を書き出す名前。"" で無効。それ自体は分類されない。</td></tr>
       </tbody>
     </table>
     </div>
@@ -503,7 +512,7 @@ python3 golem.py <span class="p">describe</span> <span class="p">--apply</span> 
       放り込めば、中身で読んで、ふさわしい場所へ。合わなければ、そのままに。
       静かに働き、いつでも戻せる、ファイルのための銅ゴーレム。
     </p>
-    <p class="fmeta">MIT License &nbsp;·&nbsp; Python standard library only &nbsp;·&nbsp; 76 unit tests &nbsp;·&nbsp; claude -p / Haiku</p>
+    <p class="fmeta">MIT License &nbsp;·&nbsp; Python standard library only &nbsp;·&nbsp; 83 unit tests &nbsp;·&nbsp; claude -p / Haiku</p>
   </footer>
 
 </div>

@@ -48,6 +48,7 @@ DEFAULT_CONFIG: dict = {
     "notify_sound": True,            # play a sound + ignore Do-Not-Disturb (so it's hard to miss)
     "interval_seconds": 0,           # also sweep every N seconds (0 = only when files change)
     "cache_no_match": True,          # remember "no fit" files; don't re-check until a folder is added
+    "report_file": "_未分類レポート.md",  # write a "why not sorted" report at each root ("" disables)
 }
 
 DEFAULT_CONFIG_PATH = Path("~/.config/copper-golem/config.toml").expanduser()
@@ -382,15 +383,73 @@ def _file_sig(path: Path) -> str:
 def load_nomatch_cache() -> dict:
     try:
         data = json.loads(NOMATCH_CACHE.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
     except (OSError, json.JSONDecodeError):
         return {}
+    if not isinstance(data, dict):
+        return {}
+    # Migrate legacy entries (kept value was a bare signature string) to the
+    # current {sig, reason, conf} shape so the report can show a reason.
+    for rec in data.values():
+        kept = rec.get("kept") if isinstance(rec, dict) else None
+        if isinstance(kept, dict):
+            for name, val in list(kept.items()):
+                if isinstance(val, str):
+                    kept[name] = {"sig": val, "reason": "", "conf": None}
+    return data
 
 
 def save_nomatch_cache(cache: dict) -> None:
     try:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         NOMATCH_CACHE.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+    except OSError:
+        pass
+
+
+REPORT_HEADER = (
+    "# 未分類レポート\n\n"
+    "どのカテゴリにも振り分けられなかったファイルと、その理由です。\n"
+    "該当するフォルダを作るか、各フォルダの .golem.md（特に「入れないもの」）を調整すると分類されます。\n"
+    "※ copper-golem が自動生成・更新します。消しても問題ありません。\n\n"
+)
+
+
+def _write_report(path: Path, kept: dict) -> None:
+    """Write a human-readable report of the no-match files and why, at `path`.
+
+    Content is a pure function of `kept` (no timestamp) and is only written when
+    it actually changes — otherwise rewriting it into the watched folder would
+    re-trigger the launchd watcher in a loop. Removed when there's nothing kept.
+    """
+    blocks = []
+    for name, rec in sorted(kept.items()):
+        if not isinstance(rec, dict):
+            continue
+        conf = rec.get("conf")
+        reason = (rec.get("reason") or "").strip() or "（理由は記録されていません）"
+        block = f"## {name}\n"
+        if isinstance(conf, (int, float)):
+            block += f"- 確信度: {conf:.2f}\n"
+        block += f"- 理由: {reason}\n"
+        blocks.append(block)
+
+    if not blocks:
+        if path.exists():
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        return
+
+    content = REPORT_HEADER + "\n".join(blocks)
+    try:
+        old = path.read_text(encoding="utf-8") if path.exists() else None
+    except OSError:
+        old = None
+    if old == content:
+        return  # unchanged — don't rewrite (avoids re-triggering the watcher)
+    try:
+        path.write_text(content, encoding="utf-8")
     except OSError:
         pass
 
@@ -443,15 +502,29 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
             rc["kept"] = {}
         kept_cache = rc["kept"]
 
+    report_name = cfg.get("report_file", "") or ""
+    write_report = (not cfg["dry_run"]) and bool(report_name)
+    # Registry of currently-kept files → {sig, reason, conf}, used for the report.
+    # When the cache is on it *is* the cache (so cached-skip files keep their
+    # reason across runs); otherwise it's a fresh per-run dict just for the report.
+    if kept_cache is not None:
+        kept_reg = kept_cache
+    elif write_report:
+        kept_reg = {}
+    else:
+        kept_reg = None
+
     considered = moved = kept = errors = 0
     for entry in entries:
-        if not entry.is_file() or is_excluded(entry, cfg):
+        if not entry.is_file() or is_excluded(entry, cfg) or entry.name == report_name:
             continue
         if not is_stable(entry, cfg):
             print(f"[wait] {entry.name}  (modified <{cfg['stability_seconds']}s ago — will retry next run)")
             continue
-        if kept_cache is not None and kept_cache.get(entry.name) == _file_sig(entry):
-            continue  # already judged "no fit" for this folder set — skip silently
+        if kept_cache is not None:
+            rec = kept_cache.get(entry.name)
+            if isinstance(rec, dict) and rec.get("sig") == _file_sig(entry):
+                continue  # already judged "no fit" for this folder set — skip silently
 
         considered += 1
         file_block = extract_text(entry, cfg)
@@ -465,6 +538,7 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
 
         folder_name = decision.get("folder")
         conf = _coerce_conf(decision.get("confidence"))
+        why = (decision.get("reason") or "").strip()
         match = next((f for f in folders if f.name == folder_name), None) if folder_name else None
 
         if match is not None and conf >= cfg["confidence_threshold"]:
@@ -472,13 +546,14 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
         else:
             if folder_name and match is None:
                 reason = f"unknown folder '{folder_name}'"
+                why = why or f"存在しないフォルダ「{folder_name}」を指定しました"
             else:
-                reason = f"no match · conf={conf:.2f} · {decision.get('reason', '')}"
+                reason = f"no match · conf={conf:.2f} · {why}"
             target = _no_match_target(root, cfg)
             if target is None:
                 kept += 1
-                if kept_cache is not None:
-                    kept_cache[entry.name] = _file_sig(entry)  # remember: don't re-check
+                if kept_reg is not None:  # remember it (+ why) for the report
+                    kept_reg[entry.name] = {"sig": _file_sig(entry), "reason": why, "conf": conf}
                 print(f"[keep] {entry.name}  ({reason})")
                 continue
             dest_dir, is_match = target, False
@@ -503,8 +578,8 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
             continue
 
         append_move(batch, entry, dest, decision)
-        if kept_cache is not None:
-            kept_cache.pop(entry.name, None)  # it left the root
+        if kept_reg is not None:
+            kept_reg.pop(entry.name, None)  # it left the root
         if is_match:
             moved += 1
             print(f"[move] {entry.name}  ->  {dest_dir.name}/  (conf={conf:.2f})")
@@ -512,10 +587,13 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
             kept += 1
             print(f"[keep] {entry.name}  ->  {dest_dir.name}/  ({reason})")
 
-    # Forget cached files that are no longer at the root (moved out, deleted).
-    if kept_cache is not None:
-        for name in [k for k in kept_cache if k not in existing_files]:
-            del kept_cache[name]
+    # Forget registry entries for files that are no longer at the root.
+    if kept_reg is not None:
+        for name in [k for k in kept_reg if k not in existing_files]:
+            del kept_reg[name]
+
+    if write_report:
+        _write_report(root / report_name, kept_reg or {})
 
     return (considered, moved, kept, errors)
 

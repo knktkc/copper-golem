@@ -609,6 +609,107 @@ class TestDescribe(unittest.TestCase):
         self.assertFalse((root / "空" / ".golem.md").exists())
 
 
+class TestUnsortedReport(StateDirMixin):
+    """A `_未分類レポート.md` at the root lists kept files and why they weren't sorted."""
+
+    REPORT = "_未分類レポート.md"
+
+    def _root(self):
+        root = self.tmp / "root"
+        (root / "A").mkdir(parents=True)
+        return root
+
+    def _keep(self, *, reason="どのフォルダにも該当しない", conf=0.0):
+        def fake(file_block, folders, c):
+            return {"folder": None, "confidence": conf, "reason": reason}
+        return fake
+
+    def _cfg(self, **over):
+        c = dict(golem.DEFAULT_CONFIG)
+        c.update(dry_run=False, stability_seconds=0, notify=False)
+        c.update(over)
+        return c
+
+    def test_report_written_with_reason(self):
+        root = self._root()
+        (root / "m.txt").write_text("謎のメモ", encoding="utf-8")
+        with mock.patch.object(golem, "classify", self._keep(reason="個人的なメモ", conf=0.05)):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b", {})
+        report = (root / self.REPORT).read_text(encoding="utf-8")
+        self.assertIn("## m.txt", report)
+        self.assertIn("個人的なメモ", report)
+        self.assertIn("0.05", report)
+
+    def test_report_removed_when_nothing_kept(self):
+        root = self._root()
+        (root / self.REPORT).write_text("古いレポート", encoding="utf-8")  # stale report
+        # a file that DOES match -> moved, nothing kept -> report should be deleted
+        def match(file_block, folders, c):
+            return {"folder": "A", "confidence": 0.9}
+        (root / "a.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "classify", match):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b", {})
+        self.assertFalse((root / self.REPORT).exists())
+
+    def test_report_not_rewritten_when_unchanged(self):
+        root = self._root()
+        (root / "m.txt").write_text("x", encoding="utf-8")
+        cache = {}
+        with mock.patch.object(golem, "classify", self._keep()):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b1", cache)
+        mtime1 = (root / self.REPORT).stat().st_mtime_ns
+        # second run: same kept set -> content identical -> must NOT rewrite
+        with mock.patch.object(golem, "classify", self._keep()):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b2", cache)
+        mtime2 = (root / self.REPORT).stat().st_mtime_ns
+        self.assertEqual(mtime1, mtime2)  # untouched -> won't re-trigger the watcher
+
+    def test_report_file_is_not_classified(self):
+        root = self._root()
+        (root / self.REPORT).write_text("既存レポート", encoding="utf-8")
+        with mock.patch.object(golem, "classify") as classify:
+            classify.side_effect = AssertionError("report file must not be classified")
+            with redirect_stdout(io.StringIO()):
+                considered, *_ = golem.process_root(root, self._cfg(), "b", {})
+        self.assertEqual(considered, 0)
+
+    def test_cached_kept_file_still_appears_in_report(self):
+        root = self._root()
+        (root / "m.txt").write_text("x", encoding="utf-8")
+        cache = {}
+        with mock.patch.object(golem, "classify", side_effect=self._keep(reason="該当なし")) as classify:
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b1", cache)
+            # second run: m.txt is cached (skipped), but report must still list it
+            (root / self.REPORT).unlink()  # delete report to prove run2 regenerates it
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(), "b2", cache)
+        self.assertEqual(classify.call_count, 1)  # cached: not re-classified
+        report = (root / self.REPORT).read_text(encoding="utf-8")
+        self.assertIn("## m.txt", report)
+        self.assertIn("該当なし", report)
+
+    def test_report_disabled_with_empty_config(self):
+        root = self._root()
+        (root / "m.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "classify", self._keep()):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(report_file=""), "b", {})
+        self.assertFalse((root / self.REPORT).exists())
+
+    def test_dry_run_writes_no_report(self):
+        root = self._root()
+        (root / "m.txt").write_text("x", encoding="utf-8")
+        with mock.patch.object(golem, "classify", self._keep()):
+            with redirect_stdout(io.StringIO()):
+                golem.process_root(root, self._cfg(dry_run=True), "b", {})
+        self.assertFalse((root / self.REPORT).exists())
+
+
 class TestNoMatchCacheEndToEnd(StateDirMixin):
     """cmd_once persists the cache across runs: a steady sweep stays silent."""
 
