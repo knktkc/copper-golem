@@ -357,6 +357,24 @@ class TestProcessRoot(StateDirMixin):
         self.assertEqual(r, (1, 0, 1, 0))
         self.assertTrue((root / "a.txt").exists())  # kept in place
 
+    def test_folder_match_is_unicode_normalized(self):
+        # regression: macOS stores names as NFD; the model replies NFC. A folder
+        # with 濁点 (が/ブ/グ…) must still match. Build the folder name in NFD and
+        # have the classifier return the NFC form.
+        import unicodedata
+        nfc_name = "ブログ関連"
+        nfd_name = unicodedata.normalize("NFD", nfc_name)
+        self.assertNotEqual(nfc_name, nfd_name)  # they really differ byte-wise
+        root = self.tmp / "root"
+        root.mkdir()
+        (root / nfd_name).mkdir()                 # folder on disk in NFD
+        (root / "a.png").write_text("img", encoding="utf-8")
+        dec = self._decider({"a.png": {"folder": nfc_name, "confidence": 0.9}})  # model says NFC
+        with mock.patch.object(golem, "classify", dec), redirect_stdout(io.StringIO()):
+            considered, moved, kept, errors = golem.process_root(root, cfg(dry_run=False), "b")
+        self.assertEqual((moved, kept), (1, 0))   # matched despite NFC/NFD difference
+        self.assertTrue((root / nfd_name / "a.png").exists())
+
     def test_unknown_folder_name_is_kept(self):
         root = self._root(files=["a.txt"])
         dec = self._decider({"a.txt": {"folder": "Nonexistent", "confidence": 0.99}})

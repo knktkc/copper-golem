@@ -23,6 +23,7 @@ import shutil
 import subprocess
 import sys
 import tomllib
+import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -465,6 +466,19 @@ def _coerce_conf(value) -> float:
         return 0.0
 
 
+def _match_folder(folder_name, folders: list[Path]) -> Path | None:
+    """Find the candidate folder named `folder_name`, tolerant of Unicode
+    normalization. macOS stores filenames as NFD (decomposed), but the model
+    replies in NFC — a raw `==` misses any name with 濁点/半濁点 (が, ブ, ぱ…)."""
+    if not folder_name:
+        return None
+    target = unicodedata.normalize("NFC", str(folder_name))
+    for f in folders:
+        if unicodedata.normalize("NFC", f.name) == target:
+            return f
+    return None
+
+
 def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -> tuple[int, int, int, int]:
     """Scan one root and sort its files. Returns (considered, moved, kept, errors).
 
@@ -539,7 +553,7 @@ def process_root(root: Path, cfg: dict, batch: str, cache: dict | None = None) -
         folder_name = decision.get("folder")
         conf = _coerce_conf(decision.get("confidence"))
         why = (decision.get("reason") or "").strip()
-        match = next((f for f in folders if f.name == folder_name), None) if folder_name else None
+        match = _match_folder(folder_name, folders)
 
         if match is not None and conf >= cfg["confidence_threshold"]:
             dest_dir, is_match, reason = match, True, ""
