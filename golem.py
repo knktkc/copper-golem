@@ -192,7 +192,7 @@ def folder_profile(folder: Path) -> str:
     profile = folder / ".golem.md"
     if profile.is_file():
         try:
-            return profile.read_text(encoding="utf-8", errors="replace").strip()[:500]
+            return profile.read_text(encoding="utf-8", errors="replace").strip()[:2000]
         except OSError:
             pass
     names = []
@@ -532,8 +532,8 @@ def _no_match_target(root: Path, cfg: dict) -> Path | None:
 # classification has an explicit rubric instead of guessing from filenames.
 # --------------------------------------------------------------------------- #
 
-PROFILE_PROMPT = """次のフォルダの中身（ファイル名と内容の抜粋）を見て、このフォルダには\
-「どんな種類のファイルを入れる場所か」を日本語で簡潔に説明してください。
+PROFILE_PROMPT = """次のフォルダの中身（ファイル名と内容の抜粋）を見て、このフォルダが\
+「どんな種類のファイルを入れる場所か」を判断してください。
 
 # フォルダ名
 {folder_name}
@@ -542,8 +542,39 @@ PROFILE_PROMPT = """次のフォルダの中身（ファイル名と内容の抜
 {contents}
 
 # 出力
-説明文だけを1〜2文で出力してください。前置き・記号・引用符・コードブロックは付けないでください。
+次の JSON だけを出力してください（前置き・コードブロックは不要）:
+{{"include": "<入れる種類のファイルの説明・1〜2文>", "exclude": "<入れない方がよいものがあれば。無ければ空文字>", "hints": "<判定の手がかりやキーワード。任意、無ければ空文字>"}}
 """
+
+
+def _parse_profile_reply(text: str) -> dict:
+    """Parse the model's profile reply into {include, exclude, hints}.
+
+    Falls back to treating the whole reply as `include` if it isn't JSON.
+    """
+    try:
+        obj = _parse_classification(text)
+        if isinstance(obj, dict):
+            return {k: str(obj.get(k, "") or "").strip() for k in ("include", "exclude", "hints")}
+    except (json.JSONDecodeError, ValueError):
+        pass
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.strip("`").strip()
+    t = t.strip().strip('"').strip("「」").strip()
+    return {"include": t, "exclude": "", "hints": ""}
+
+
+def _format_profile(folder_name: str, parts: dict) -> str:
+    """Render the editable .golem.md template from the parsed parts."""
+    return (
+        f"# {folder_name}\n\n"
+        f"## 入れるもの\n{parts['include']}\n\n"
+        f"## 入れないもの\n{parts.get('exclude') or '特になし'}\n\n"
+        f"## 手がかり\n{parts.get('hints') or '—'}\n\n"
+        f"<!-- golem describe が生成。自由に編集できます。"
+        f"このファイルの内容が、そのまま分類の判定基準になります。 -->\n"
+    )
 
 
 def _folder_digest(folder: Path, cfg: dict) -> str:
@@ -579,13 +610,10 @@ def generate_profile(folder: Path, cfg: dict) -> tuple[str | None, str]:
     text, err = _invoke_claude(prompt, cfg)
     if text is None:
         return None, err
-    text = text.strip()
-    if text.startswith("```"):
-        text = text.strip("`").strip()
-    text = text.strip().strip('"').strip("「」").strip()
-    if not text:
+    parts = _parse_profile_reply(text)
+    if not parts.get("include"):
         return None, "empty response"
-    return text, ""
+    return _format_profile(folder.name, parts), ""
 
 
 def cmd_describe(cfg: dict, roots: list[Path], force: bool) -> int:
@@ -615,16 +643,18 @@ def cmd_describe(cfg: dict, roots: list[Path], force: bool) -> int:
                 continue
             done += 1
             if cfg["dry_run"]:
-                print(f"[dry-run] {folder.name}/.golem.md  ←  {text}")
+                print(f"[dry-run] {folder.name}/.golem.md")
+                for line in text.rstrip("\n").splitlines():
+                    print(f"    {line}")
             else:
                 try:
-                    profile.write_text(text + "\n", encoding="utf-8")
+                    profile.write_text(text.rstrip("\n") + "\n", encoding="utf-8")
                 except OSError as e:
                     done -= 1
                     errors += 1
                     print(f"[error] {folder.name}/  — write failed: {e}")
                     continue
-                print(f"[write] {folder.name}/.golem.md  ←  {text}")
+                print(f"[write] {folder.name}/.golem.md")
 
     verb = "would write" if cfg["dry_run"] else "wrote"
     print(f"\n[describe] {verb} {done} · skipped {skipped} · errors {errors}")

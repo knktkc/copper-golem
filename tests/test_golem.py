@@ -519,20 +519,26 @@ class TestDescribe(unittest.TestCase):
             (root / f).mkdir()
         return root
 
-    def test_generate_profile_returns_text(self):
+    def test_generate_profile_builds_structured_template(self):
         root = self._root()
         (root / "請求書" / "invoice.txt").write_text("請求書 合計 1000円", encoding="utf-8")
-        with mock.patch.object(golem, "_invoke_claude", return_value=("取引先からの請求書を入れる場所。", "")):
+        reply = '{"include": "取引先からの請求書。", "exclude": "スクショ", "hints": "金額・支払期限"}'
+        with mock.patch.object(golem, "_invoke_claude", return_value=(reply, "")):
             text, err = golem.generate_profile(root / "請求書", cfg())
         self.assertEqual(err, "")
-        self.assertEqual(text, "取引先からの請求書を入れる場所。")
+        self.assertIn("# 請求書", text)
+        self.assertIn("## 入れるもの\n取引先からの請求書。", text)
+        self.assertIn("## 入れないもの\nスクショ", text)
+        self.assertIn("## 手がかり\n金額・支払期限", text)
 
-    def test_generate_profile_strips_quotes_and_fences(self):
+    def test_generate_profile_falls_back_to_plain_text(self):
+        # non-JSON reply → whole text becomes the "include" section
         root = self._root()
         (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
         with mock.patch.object(golem, "_invoke_claude", return_value=('```\n「請求書の置き場」\n```', "")):
             text, _ = golem.generate_profile(root / "請求書", cfg())
-        self.assertEqual(text, "請求書の置き場")
+        self.assertIn("## 入れるもの\n請求書の置き場", text)
+        self.assertIn("## 入れないもの\n特になし", text)  # empty exclude → placeholder
 
     def test_generate_profile_empty_folder(self):
         root = self._root()
@@ -552,17 +558,21 @@ class TestDescribe(unittest.TestCase):
         root = self._root()
         (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
         (root / "写真" / "p.txt").write_text("x", encoding="utf-8")
-        with mock.patch.object(golem, "_invoke_claude", return_value=("説明文", "")):
+        reply = '{"include": "説明文", "exclude": "", "hints": ""}'
+        with mock.patch.object(golem, "_invoke_claude", return_value=(reply, "")):
             with redirect_stdout(io.StringIO()):
                 golem.cmd_describe(cfg(dry_run=False), [root], force=False)
-        self.assertEqual((root / "請求書" / ".golem.md").read_text(encoding="utf-8").strip(), "説明文")
-        self.assertEqual((root / "写真" / ".golem.md").read_text(encoding="utf-8").strip(), "説明文")
+        for name in ("請求書", "写真"):
+            content = (root / name / ".golem.md").read_text(encoding="utf-8")
+            self.assertIn("## 入れるもの\n説明文", content)
+            self.assertIn(f"# {name}", content)
 
     def test_describe_skips_existing_without_force(self):
         root = self._root(folders=("請求書",))
         (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
         (root / "請求書" / ".golem.md").write_text("既存の説明", encoding="utf-8")
-        with mock.patch.object(golem, "_invoke_claude", return_value=("新しい説明", "")) as inv:
+        reply = '{"include": "新しい説明"}'
+        with mock.patch.object(golem, "_invoke_claude", return_value=(reply, "")) as inv:
             with redirect_stdout(io.StringIO()):
                 golem.cmd_describe(cfg(dry_run=False), [root], force=False)
         inv.assert_not_called()  # didn't even ask Claude
@@ -572,15 +582,18 @@ class TestDescribe(unittest.TestCase):
         root = self._root(folders=("請求書",))
         (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
         (root / "請求書" / ".golem.md").write_text("古い説明", encoding="utf-8")
-        with mock.patch.object(golem, "_invoke_claude", return_value=("新しい説明", "")):
+        reply = '{"include": "新しい説明"}'
+        with mock.patch.object(golem, "_invoke_claude", return_value=(reply, "")):
             with redirect_stdout(io.StringIO()):
                 golem.cmd_describe(cfg(dry_run=False), [root], force=True)
-        self.assertEqual((root / "請求書" / ".golem.md").read_text(encoding="utf-8").strip(), "新しい説明")
+        self.assertIn("## 入れるもの\n新しい説明",
+                      (root / "請求書" / ".golem.md").read_text(encoding="utf-8"))
 
     def test_describe_dry_run_does_not_write(self):
         root = self._root(folders=("請求書",))
         (root / "請求書" / "a.txt").write_text("x", encoding="utf-8")
-        with mock.patch.object(golem, "_invoke_claude", return_value=("説明文", "")):
+        reply = '{"include": "説明文"}'
+        with mock.patch.object(golem, "_invoke_claude", return_value=(reply, "")):
             buf = io.StringIO()
             with redirect_stdout(buf):
                 golem.cmd_describe(cfg(dry_run=True), [root], force=False)
