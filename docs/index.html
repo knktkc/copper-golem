@@ -342,8 +342,9 @@
       <div class="feat">
         <span class="tag">Observable</span>
         <h3>結果が見える</h3>
-        <p>動くたびに結果をデスクトップ通知でお知らせします（音つき・集中モードも越える）。
-        ログは「移動した」「残した」「エラー」を明確に区別し、実行ごとに件数を要約します。
+        <p>ライブ実行で振り分け・残置・エラーが起きたとき、結果をデスクトップ通知でお知らせします
+        （音つき・集中モードも越える）。dry-run では通知せず、何も起きなかった回は静かに何もしません。
+        ログは「移動した」「残した」「エラー」を明確に区別し、何か起きた回は件数を要約します。
         ログを開かなくても状況が分かります。</p>
       </div>
 
@@ -421,7 +422,7 @@ python3 golem.py <span class="p">--apply</span></div>
       <div class="term"><span class="c"># 常駐を解除する</span>
 <b>./uninstall.sh</b>
 
-<span class="c"># 開発者向け：テスト一式（59件）</span>
+<span class="c"># 開発者向け：テスト一式（76件）</span>
 python3 -m unittest discover -s tests</div>
     </div>
 
@@ -432,13 +433,21 @@ python3 -m unittest discover -s tests</div>
 
     <div class="term"><span class="c"># 各フォルダの中身から「何を入れる場所か」の説明を自動生成</span>
 python3 golem.py <span class="p">describe</span> <span class="p">--dry-run</span>
-<span class="o">[dry-run] 請求書/.golem.md  ←  取引先に発行した請求書を保存するフォルダです。</span>
+<span class="o">[dry-run] 請求書/.golem.md</span>
+<span class="o">    # 請求書</span>
+<span class="o">    ## 入れるもの</span>
+<span class="o">    取引先に発行した請求書を保存するフォルダ。</span>
+<span class="o">    ## 入れないもの</span>
+<span class="o">    領収書、見積書</span>
+<span class="o">    ## 手がかり</span>
+<span class="o">    金額、支払期限、振込先、invoice</span>
 
 python3 golem.py <span class="p">describe</span> <span class="p">--apply</span>   <span class="c"># 実際に .golem.md を書き出す</span></div>
 
     <p style="color:var(--ink-soft);">
-      <code>describe</code> は、フォルダにすでに入っているファイルの内容を読み、その説明を <code>.golem.md</code> として書き出します。
-      生成後は手で調整でき、「〜は含めない」のような除外条件を足すと、より意図どおりに分かれます。
+      <code>describe</code> は、フォルダにすでに入っているファイルの内容を読み、
+      <code>.golem.md</code> を「入れるもの／入れないもの／手がかり」の構造化テンプレートとして書き出します。
+      生成後は手で調整でき、「入れないもの」に除外条件を足すと、より意図どおりに分かれます。
     </p>
   </section>
 
@@ -464,7 +473,7 @@ python3 golem.py <span class="p">describe</span> <span class="p">--apply</span> 
         <tr><td class="key">interval_seconds</td><td class="def">0</td><td class="desc">変化時に加え一定間隔でもスイープ。0 で即時のみ。</td></tr>
         <tr><td class="key">exclude_globs</td><td class="def">["*.crdownload", …]</td><td class="desc">無視するファイル名パターン。未完了DLや一時ファイル。</td></tr>
         <tr><td class="key">enable_ocr</td><td class="def">false</td><td class="desc">画像を OCR で読む（tesseract が必要・低速）。</td></tr>
-        <tr><td class="key">notify / notify_sound</td><td class="def">true / true</td><td class="desc">実行後にデスクトップ通知。音つき・集中モードを越える。</td></tr>
+        <tr><td class="key">notify / notify_sound</td><td class="def">true / true</td><td class="desc">ライブ実行で何か動いたときにデスクトップ通知（dry-run では出ない）。音つき・集中モードを越える。</td></tr>
         <tr><td class="key">claude_bin</td><td class="def">""</td><td class="desc">claude の絶対パス。空なら自動検出。常駐で見つからない時に指定。</td></tr>
       </tbody>
     </table>
@@ -494,7 +503,7 @@ python3 golem.py <span class="p">describe</span> <span class="p">--apply</span> 
       放り込めば、中身で読んで、ふさわしい場所へ。合わなければ、そのままに。
       静かに働き、いつでも戻せる、ファイルのための銅ゴーレム。
     </p>
-    <p class="fmeta">MIT License &nbsp;·&nbsp; Python standard library only &nbsp;·&nbsp; 59 unit tests &nbsp;·&nbsp; claude -p / Haiku</p>
+    <p class="fmeta">MIT License &nbsp;·&nbsp; Python standard library only &nbsp;·&nbsp; 76 unit tests &nbsp;·&nbsp; claude -p / Haiku</p>
   </footer>
 
 </div>
