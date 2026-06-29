@@ -164,4 +164,4 @@ python3 -m unittest discover -s tests
 
 ## ライセンス
 
-MIT（`LICENSE`）。著作権者名は適宜書き換えてください。
+MIT License（`LICENSE`）。Copyright (c) 2026 knktkc.
